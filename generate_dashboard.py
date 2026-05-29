@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
-import sys
 import textwrap
 import time as time_module
 import unicodedata
@@ -21,6 +21,8 @@ from PIL import Image, ImageDraw, ImageFont
 WIDTH = 400
 HEIGHT = 600
 OUT = Path("papercolor_dashboard_test.png")
+
+logger = logging.getLogger("papercolor_dashboard")
 
 
 @dataclass(frozen=True)
@@ -157,6 +159,35 @@ def fetch_weather() -> Weather:
     )
 
 
+def urlopen_with_retries(req: urllib.request.Request, *, timeout: int) -> bytes:
+    retryable_statuses = {429, 500, 502, 503, 504}
+    attempts = max(1, http_retries())
+    delay = max(0.0, http_retry_delay_seconds())
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            retryable = exc.code in retryable_statuses
+            if not retryable or attempt == attempts:
+                raise
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt == attempts:
+                raise
+
+        logger.warning(
+            "HTTP retry %d/%d for %s: %s", attempt, attempts, req.full_url, last_error
+        )
+        if delay > 0:
+            time_module.sleep(delay)
+
+    raise RuntimeError(f"HTTP request failed after {attempts} attempts: {last_error}")
+
+
 def request_json(
     url: str,
     *,
@@ -176,31 +207,8 @@ def request_json(
         data = urllib.parse.urlencode(form).encode("utf-8")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-    retryable_statuses = {429, 500, 502, 503, 504}
-    attempts = max(1, http_retries())
-    delay = max(0.0, http_retry_delay_seconds())
-    last_error: Exception | None = None
-
-    for attempt in range(1, attempts + 1):
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=20) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            last_error = exc
-            retryable = exc.code in retryable_statuses
-            if not retryable or attempt == attempts:
-                raise
-        except (urllib.error.URLError, TimeoutError) as exc:
-            last_error = exc
-            if attempt == attempts:
-                raise
-
-        print(f"HTTP retry {attempt}/{attempts} for {url}: {last_error}", file=sys.stderr)
-        if delay > 0:
-            time_module.sleep(delay)
-
-    raise RuntimeError(f"HTTP request failed after {attempts} attempts: {last_error}")
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    return json.loads(urlopen_with_retries(req, timeout=20).decode("utf-8"))
 
 
 def air_quality_label(aqi: int | None) -> str:
@@ -364,8 +372,7 @@ def upload_to_ezdata(image_path: Path) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    return json.loads(urlopen_with_retries(req, timeout=30).decode("utf-8"))
 
 
 def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -498,9 +505,24 @@ def generate_dashboard() -> Path:
     load_dotenv()
     timezone = required_env("WEATHER_TIMEZONE")
     now = datetime.now(ZoneInfo(timezone))
-    weather = fetch_weather()
-    air = fetch_air_quality()
-    tasks = fetch_todoist_tasks(now)
+
+    try:
+        weather = fetch_weather()
+    except Exception as exc:
+        logger.warning("Could not fetch weather: %s", exc)
+        weather = None
+
+    try:
+        air = fetch_air_quality()
+    except Exception as exc:
+        logger.warning("Could not fetch air quality: %s", exc)
+        air = AirQuality(aqi=None, label="--", pm25=None)
+
+    try:
+        tasks: list[TodoistTask] | None = fetch_todoist_tasks(now)
+    except Exception as exc:
+        logger.warning("Could not fetch Todoist tasks: %s", exc)
+        tasks = None
 
     img = Image.new("RGB", (WIDTH, HEIGHT), "#fbfaf4")
     draw = ImageDraw.Draw(img)
@@ -519,8 +541,9 @@ def generate_dashboard() -> Path:
     draw.rectangle((0, 0, WIDTH, 82), fill=ink)
     draw.rectangle((0, 82, WIDTH, 94), fill=yellow)
 
+    location = weather.location if weather else os.environ.get("WEATHER_LOCATION", "")
     draw_text(draw, (22, 16), spanish_date(now), 32, "#ffffff", True)
-    draw_text(draw, (24, 54), f"{weather.location}  |  actualizado {now:%H:%M}", 17, "#ffffff")
+    draw_text(draw, (24, 54), f"{location}  |  actualizado {now:%H:%M}", 17, "#ffffff")
 
     current_card = (18, 108, 191, 198)
     air_card = (209, 108, 382, 198)
@@ -528,15 +551,17 @@ def generate_dashboard() -> Path:
     tomorrow_card = (209, 214, 382, 304)
 
     card(draw, current_card, "#ffffff", line)
-    draw_centered_stack(
-        draw,
-        current_card,
-        [
+    if weather is not None:
+        current_lines = [
             (f"{weather.current_c}°", 42, ink, True),
             (weather.condition, 18, muted, False),
-        ],
-        gap=4,
-    )
+        ]
+    else:
+        current_lines = [
+            ("--°", 42, ink, True),
+            ("clima n/d", 18, muted, False),
+        ]
+    draw_centered_stack(draw, current_card, current_lines, gap=4)
 
     card(draw, air_card, air_fill, line)
     draw_centered_stack(
@@ -555,8 +580,8 @@ def generate_dashboard() -> Path:
         today_card,
         "HOY",
         red,
-        f"{weather.today_low}° / {weather.today_high}°",
-        weather.today_condition,
+        f"{weather.today_low}° / {weather.today_high}°" if weather else "n/d",
+        weather.today_condition if weather else "clima n/d",
         cream,
         line,
         ink,
@@ -567,8 +592,8 @@ def generate_dashboard() -> Path:
         tomorrow_card,
         "MANANA",
         green,
-        f"{weather.tomorrow_low}° / {weather.tomorrow_high}°",
-        weather.tomorrow_condition,
+        f"{weather.tomorrow_low}° / {weather.tomorrow_high}°" if weather else "n/d",
+        weather.tomorrow_condition if weather else "clima n/d",
         cream,
         line,
         ink,
@@ -577,7 +602,9 @@ def generate_dashboard() -> Path:
 
     y = 330
     draw_section(draw, y, "Tareas", red if tasks else blue)
-    if not tasks:
+    if tasks is None:
+        draw_text(draw, (28, y + 44), "Tareas n/d", 20, muted, True)
+    elif not tasks:
         draw_text(draw, (28, y + 44), "Sin tareas pendientes", 20, green, True)
     else:
         task_y = y + 42
@@ -617,11 +644,21 @@ def main() -> None:
     parser.add_argument("--upload", action="store_true", help="Upload the generated image to EzData.")
     args = parser.parse_args()
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     image_path = generate_dashboard()
-    print(image_path)
+    logger.info("Dashboard generated: %s", image_path)
     if args.upload:
         result = upload_to_ezdata(image_path)
-        print(json.dumps(result, ensure_ascii=True))
+        code = result.get("code")
+        msg = result.get("msg")
+        if code == 200:
+            logger.info("Image uploaded to EzData (code=%s msg=%s)", code, msg)
+        else:
+            logger.error("EzData rejected the upload (code=%s msg=%s)", code, msg)
 
 
 if __name__ == "__main__":
