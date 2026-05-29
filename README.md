@@ -1,7 +1,8 @@
 # M5Stack PaperColor EzData Notes
 
-This repo contains notes and local test assets for pushing images to an M5Stack
-PaperColor device through M5Stack EzData2.
+Unofficial project, not affiliated with M5Stack.
+
+This repo contains notes and local test assets for pushing images to an M5Stack PaperColor device through M5Stack EzData2.
 
 ## Device Context
 
@@ -31,6 +32,19 @@ The token is stored locally in `.env`:
 ```sh
 TOKEN=...
 DEVICE_ID=...
+WEATHER_LAT=...
+WEATHER_LON=...
+WEATHER_LOCATION=...
+WEATHER_TIMEZONE=...
+TODOIST_API_TOKEN=...
+TODOIST_QUERY="overdue | today"
+TODOIST_TASK_LIMIT=50
+PAPERCOLOR_BASE_URL=http://192.168.4.1
+BATTERY_LOG=battery_log.csv
+BATTERY_CONNECT_TIMEOUT_SECONDS=3
+BATTERY_MAX_TIME_SECONDS=8
+HTTP_RETRIES=3
+HTTP_RETRY_DELAY_SECONDS=5
 ```
 
 Do not commit `.env`.
@@ -49,6 +63,23 @@ curl -sS -X POST 'https://ezdata2.m5stack.com/api/v2/device/uploadDeviceFile' \
   -F "name=image" \
   -F "file=@papercolor_ezdata_image_field.png;type=image/png" \
   -w '\nHTTP_STATUS:%{http_code}\n'
+```
+
+The included `generate_dashboard.py` script creates a `400x600` dashboard PNG.
+It reads weather location settings from `.env`, fetches current weather plus
+today/tomorrow forecast from Open-Meteo, fetches current US AQI air-quality data
+from Open-Meteo Air Quality, queries Todoist with `TODOIST_QUERY`, and renders
+active tasks due today or overdue. Tasks are sorted by due time/date, overdue
+tasks are marked in red with `!`, and hidden overflow is summarized as `+N mas`.
+
+```sh
+uv run python generate_dashboard.py
+```
+
+To generate and upload the image to EzData in one step:
+
+```sh
+uv run python generate_dashboard.py --upload
 ```
 
 A successful response looks like:
@@ -91,6 +122,69 @@ From `m5stack/M5PaperColor-UserDemo`:
 In normal EzData Mode, a newly uploaded `image` field should appear after the
 device's next polling/update cycle.
 
+## Battery Logging
+
+The factory firmware exposes battery voltage on the local API:
+
+```sh
+/api/battery
+```
+
+Use `log_battery.sh` to append one battery sample to a CSV file:
+
+```sh
+./log_battery.sh
+```
+
+Default output:
+
+```sh
+battery_log.csv
+```
+
+Each row contains:
+
+```csv
+timestamp,status,voltage_mv,percent,error
+```
+
+`status=ok` means a battery sample was captured. `status=unreachable` usually
+means the device is asleep, powered off, or unavailable on the local network.
+This is expected when Low Power Mode is working.
+
+To sample every 5 minutes for a few hours, leave this running:
+
+```sh
+while true; do ./log_battery.sh; sleep 300; done
+```
+
+The percentage is an approximation derived from the voltage curve used by the
+factory web UI. For the local API to work, this machine must be able to reach
+the PaperColor local web server, usually `http://192.168.4.1` when connected to
+the device AP.
+
+## Extending Battery Life
+
+With the official/factory firmware, battery life depends mostly on whether the
+ESP32-S3 stays awake with Wi-Fi active or sleeps between refreshes.
+
+Use the web UI settings:
+
+- Enable `Low Power Mode`.
+- Enable `Auto Slideshow`.
+- Set `Interval` to the desired wake cadence, for example `60` minutes.
+- Disconnect clients from the PaperColor AP or close the local web UI. The
+  firmware keeps the device awake while AP clients are connected.
+
+In this mode the firmware should wake on schedule, refresh the image, then power
+off/sleep again. Avoid manual double-press shutdown because the UI notes that it
+disables auto wake.
+
+Observed active-mode discharge can be on the order of hours because the device
+keeps Wi-Fi, EzData/MQTT, and the web server active. Low Power Mode should reduce
+the average current by making the device unavailable between wake windows; in the
+battery log this appears as `status=unreachable` rows while the device sleeps.
+
 ## Future Improvements
 
 - Include battery status in generated images. The factory firmware exposes
@@ -105,3 +199,6 @@ device's next polling/update cycle.
 - Factory firmware guide: https://docs.m5stack.com/en/guide/display_device/papercolor/usage
 - EzData2 API docs: https://docs.m5stack.com/en/guide/ezdata/ezdata_v2_protocol
 - Firmware/demo repo: https://github.com/m5stack/M5PaperColor-UserDemo
+- Open-Meteo forecast API: https://open-meteo.com/en/docs
+- Open-Meteo air quality API: https://open-meteo.com/en/docs/air-quality-api
+- Todoist API docs: https://developer.todoist.com/api/v1/
