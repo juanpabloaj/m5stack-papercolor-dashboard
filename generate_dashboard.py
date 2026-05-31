@@ -91,27 +91,27 @@ def display_safe(text: str) -> str:
 
 def weather_label(code: int) -> str:
     labels = {
-        0: "Despejado",
-        1: "Mayormente claro",
-        2: "Parcial",
-        3: "Nublado",
-        45: "Neblina",
-        48: "Escarcha",
-        51: "Llovizna",
-        53: "Llovizna",
-        55: "Llovizna",
-        61: "Lluvia",
-        63: "Lluvia",
-        65: "Lluvia fuerte",
-        71: "Nieve",
-        73: "Nieve",
-        75: "Nieve fuerte",
-        80: "Chubascos",
-        81: "Chubascos",
-        82: "Chubascos fuertes",
-        95: "Tormenta",
-        96: "Tormenta",
-        99: "Tormenta fuerte",
+        0: "Clear",
+        1: "Mostly clear",
+        2: "Partly cloudy",
+        3: "Cloudy",
+        45: "Fog",
+        48: "Rime fog",
+        51: "Drizzle",
+        53: "Drizzle",
+        55: "Drizzle",
+        61: "Rain",
+        63: "Rain",
+        65: "Heavy rain",
+        71: "Snow",
+        73: "Snow",
+        75: "Heavy snow",
+        80: "Showers",
+        81: "Showers",
+        82: "Heavy showers",
+        95: "Storm",
+        96: "Storm",
+        99: "Heavy storm",
     }
     return labels.get(code, "Variable")
 
@@ -273,7 +273,7 @@ def parse_todoist_due(due: dict, now: datetime) -> tuple[datetime, str, bool] | 
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=now.tzinfo)
         parsed = parsed.astimezone(now.tzinfo)
-        label = "ayer" if parsed.date() == yesterday else "atrasada"
+        label = "yesterday" if parsed.date() == yesterday else "overdue"
         if parsed.date() == now.date():
             label = parsed.strftime("%H:%M")
         return parsed, label, parsed < now
@@ -284,7 +284,7 @@ def parse_todoist_due(due: dict, now: datetime) -> tuple[datetime, str, bool] | 
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=now.tzinfo)
             parsed = parsed.astimezone(now.tzinfo)
-            label = "ayer" if parsed.date() == yesterday else "atrasada"
+            label = "yesterday" if parsed.date() == yesterday else "overdue"
             if parsed.date() == now.date():
                 label = parsed.strftime("%H:%M")
             return parsed, label, parsed < now
@@ -292,10 +292,10 @@ def parse_todoist_due(due: dict, now: datetime) -> tuple[datetime, str, bool] | 
         parsed_date = date.fromisoformat(due_date)
         parsed = datetime.combine(parsed_date, time.min, tzinfo=now.tzinfo)
         if parsed_date < now.date():
-            label = "ayer" if parsed_date == yesterday else parsed_date.strftime("%d/%m")
+            label = "yesterday" if parsed_date == yesterday else parsed_date.strftime("%d/%m")
             return parsed, label, True
         if parsed_date == now.date():
-            return parsed, "hoy", False
+            return parsed, "today", False
         return parsed, parsed_date.strftime("%d/%m"), False
 
     return None
@@ -482,21 +482,21 @@ def measure_task_height(task: TodoistTask) -> int:
     return 44 if len(clipped_task(task.content)) > 1 else 29
 
 
-def spanish_date(now: datetime) -> str:
-    weekdays = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
+def display_date(now: datetime) -> str:
+    weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     months = [
-        "Enero",
-        "Febrero",
-        "Marzo",
-        "Abril",
-        "Mayo",
-        "Junio",
-        "Julio",
-        "Agosto",
-        "Septiembre",
-        "Octubre",
-        "Noviembre",
-        "Diciembre",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ]
     return f"{weekdays[now.weekday()]} {now.day} {months[now.month - 1]}"
 
@@ -542,8 +542,8 @@ def generate_dashboard() -> Path:
     draw.rectangle((0, 82, WIDTH, 94), fill=yellow)
 
     location = weather.location if weather else os.environ.get("WEATHER_LOCATION", "")
-    draw_text(draw, (22, 16), spanish_date(now), 32, "#ffffff", True)
-    draw_text(draw, (24, 54), f"{location}  |  actualizado {now:%H:%M}", 17, "#ffffff")
+    draw_text(draw, (22, 16), display_date(now), 32, "#ffffff", True)
+    draw_text(draw, (24, 54), f"{location}  |  updated {now:%H:%M}", 17, "#ffffff")
 
     current_card = (18, 108, 191, 198)
     air_card = (209, 108, 382, 198)
@@ -578,7 +578,7 @@ def generate_dashboard() -> Path:
     draw_forecast_card(
         draw,
         today_card,
-        "HOY",
+        "TODAY",
         red,
         f"{weather.today_low}° / {weather.today_high}°" if weather else "n/d",
         weather.today_condition if weather else "clima n/d",
@@ -590,7 +590,7 @@ def generate_dashboard() -> Path:
     draw_forecast_card(
         draw,
         tomorrow_card,
-        "MANANA",
+        "TOMORROW",
         green,
         f"{weather.tomorrow_low}° / {weather.tomorrow_high}°" if weather else "n/d",
         weather.tomorrow_condition if weather else "clima n/d",
@@ -601,11 +601,11 @@ def generate_dashboard() -> Path:
     )
 
     y = 330
-    draw_section(draw, y, "Tareas", red if tasks else blue)
+    draw_section(draw, y, "Tasks", red if tasks else blue)
     if tasks is None:
-        draw_text(draw, (28, y + 44), "Tareas n/d", 20, muted, True)
+        draw_text(draw, (28, y + 44), "Tasks n/a", 20, muted, True)
     elif not tasks:
-        draw_text(draw, (28, y + 44), "Sin tareas pendientes", 20, green, True)
+        draw_text(draw, (28, y + 44), "No pending tasks", 20, green, True)
     else:
         task_y = y + 42
         shown_count = 0
@@ -633,7 +633,7 @@ def generate_dashboard() -> Path:
             shown_count += 1
 
         if hidden_count > 0 and task_y <= 574:
-            draw_text(draw, (56, task_y + 2), f"+{hidden_count} mas", 17, muted, True)
+            draw_text(draw, (56, task_y + 2), f"+{hidden_count} more", 17, muted, True)
 
     img.save(OUT)
     return OUT.resolve()

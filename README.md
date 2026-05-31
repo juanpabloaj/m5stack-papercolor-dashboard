@@ -70,7 +70,7 @@ It reads weather location settings from `.env`, fetches current weather plus
 today/tomorrow forecast from Open-Meteo, fetches current US AQI air-quality data
 from Open-Meteo Air Quality, queries Todoist with `TODOIST_QUERY`, and renders
 active tasks due today or overdue. Tasks are sorted by due time/date, overdue
-tasks are marked in red with `!`, and hidden overflow is summarized as `+N mas`.
+tasks are marked in red with `!`, and hidden overflow is summarized as `+N more`.
 
 ```sh
 uv run python generate_dashboard.py
