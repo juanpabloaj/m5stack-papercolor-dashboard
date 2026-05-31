@@ -40,6 +40,8 @@ class Weather:
     tomorrow_high: int
     tomorrow_condition: str
     tomorrow_rain_prob: int | None
+    next_solar_time: str | None
+    next_solar_label: str | None
 
 
 @dataclass(frozen=True)
@@ -123,12 +125,35 @@ def weather_label(code: int) -> str:
     return labels.get(code, "Variable")
 
 
-def fetch_weather() -> Weather:
+def next_solar_event(
+    daily: dict, now: datetime
+) -> tuple[str | None, str | None]:
+    events: list[tuple[datetime, str]] = []
+    for raw_time in daily.get("sunrise") or []:
+        parsed = datetime.fromisoformat(raw_time)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=now.tzinfo)
+        events.append((parsed, "sunrise"))
+    for raw_time in daily.get("sunset") or []:
+        parsed = datetime.fromisoformat(raw_time)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=now.tzinfo)
+        events.append((parsed, "sunset"))
+
+    future_events = sorted(event for event in events if event[0] > now)
+    if not future_events:
+        return None, None
+    event_time, label = future_events[0]
+    return event_time.strftime("%H:%M"), label
+
+
+def fetch_weather(now: datetime | None = None) -> Weather:
     load_dotenv()
     lat = required_env("WEATHER_LAT")
     lon = required_env("WEATHER_LON")
     location = required_env("WEATHER_LOCATION")
     timezone = required_env("WEATHER_TIMEZONE")
+    now = now or datetime.now(ZoneInfo(timezone))
 
     params = {
         "latitude": lat,
@@ -148,6 +173,8 @@ def fetch_weather() -> Weather:
                 "temperature_2m_max",
                 "temperature_2m_min",
                 "precipitation_probability_max",
+                "sunrise",
+                "sunset",
             ]
         ),
         "timezone": timezone,
@@ -159,6 +186,7 @@ def fetch_weather() -> Weather:
 
     current = data["current"]
     daily = data["daily"]
+    next_solar_time, next_solar_label = next_solar_event(daily, now)
     return Weather(
         location=location,
         current_c=round(current["temperature_2m"]),
@@ -184,6 +212,8 @@ def fetch_weather() -> Weather:
             and daily["precipitation_probability_max"][1] is not None
             else None
         ),
+        next_solar_time=next_solar_time,
+        next_solar_label=next_solar_label,
     )
 
 
@@ -502,6 +532,22 @@ def centered_text(
     draw_text(draw, (x, y), text, size, color, bold)
 
 
+def centered_text_at_y(
+    draw: ImageDraw.ImageDraw,
+    x0: int,
+    x1: int,
+    y: int,
+    text: str,
+    size: int,
+    color: str,
+    bold: bool = False,
+) -> None:
+    f = font(size, bold)
+    bbox = draw.textbbox((0, 0), text, font=f)
+    x = x0 + (x1 - x0 - (bbox[2] - bbox[0])) // 2
+    draw_text(draw, (x, y), text, size, color, bold)
+
+
 def draw_inline_centered(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
@@ -665,7 +711,7 @@ def generate_dashboard() -> Path:
     now = datetime.now(ZoneInfo(timezone))
 
     try:
-        weather = fetch_weather()
+        weather = fetch_weather(now)
     except Exception as exc:
         logger.warning("Could not fetch weather: %s", exc)
         weather = None
@@ -702,10 +748,15 @@ def generate_dashboard() -> Path:
     location = (
         weather.location if weather else os.environ.get("WEATHER_LOCATION", "")
     )
-    draw_text(draw, (22, 16), display_date(now), 32, "#ffffff", True)
-    draw_text(
-        draw, (24, 54), f"{location}  |  updated {now:%H:%M}", 17, "#ffffff"
+    solar_text = (
+        f"{weather.next_solar_label} {weather.next_solar_time}"
+        if weather and weather.next_solar_time and weather.next_solar_label
+        else f"updated {now:%H:%M}"
     )
+    draw_text(draw, (22, 16), display_date(now), 32, "#ffffff", True)
+    draw_text(draw, (24, 54), f"{location}  |  {solar_text}", 17, "#ffffff")
+    centered_text_at_y(draw, 292, 382, 16, f"{now:%H:%M}", 32, "#ffffff", True)
+    centered_text_at_y(draw, 292, 382, 54, "updated", 17, "#ffffff")
 
     current_card = (18, 108, 191, 198)
     air_card = (209, 108, 382, 198)
