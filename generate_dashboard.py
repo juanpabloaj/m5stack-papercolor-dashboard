@@ -652,7 +652,7 @@ def draw_forecast_card(
         gap=13,
     )
     centered_text(
-        draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), aqi_line, 15, muted
+        draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), aqi_line, 16, muted
     )
 
 
