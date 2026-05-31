@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw, ImageFont
 
-
 WIDTH = 400
 HEIGHT = 600
 OUT = Path("papercolor_dashboard_test.png")
@@ -36,9 +35,11 @@ class Weather:
     today_low: int
     today_high: int
     today_condition: str
+    today_rain_prob: int | None
     tomorrow_low: int
     tomorrow_high: int
     tomorrow_condition: str
+    tomorrow_rain_prob: int | None
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,12 @@ class AirQuality:
     aqi: int | None
     label: str
     pm25: float | None
+    today_min: int | None = None
+    today_max: int | None = None
+    today_peak_hour: str | None = None
+    tomorrow_min: int | None = None
+    tomorrow_max: int | None = None
+    tomorrow_peak_hour: str | None = None
 
 
 @dataclass(frozen=True)
@@ -135,11 +142,20 @@ def fetch_weather() -> Weather:
                 "wind_speed_10m",
             ]
         ),
-        "daily": ",".join(["weather_code", "temperature_2m_max", "temperature_2m_min"]),
+        "daily": ",".join(
+            [
+                "weather_code",
+                "temperature_2m_max",
+                "temperature_2m_min",
+                "precipitation_probability_max",
+            ]
+        ),
         "timezone": timezone,
         "forecast_days": "2",
     }
-    data = request_json("https://api.open-meteo.com/v1/forecast", params=params)
+    data = request_json(
+        "https://api.open-meteo.com/v1/forecast", params=params
+    )
 
     current = data["current"]
     daily = data["daily"]
@@ -153,13 +169,27 @@ def fetch_weather() -> Weather:
         today_low=round(daily["temperature_2m_min"][0]),
         today_high=round(daily["temperature_2m_max"][0]),
         today_condition=weather_label(int(daily["weather_code"][0])),
+        today_rain_prob=(
+            round(daily["precipitation_probability_max"][0])
+            if daily.get("precipitation_probability_max")
+            and daily["precipitation_probability_max"][0] is not None
+            else None
+        ),
         tomorrow_low=round(daily["temperature_2m_min"][1]),
         tomorrow_high=round(daily["temperature_2m_max"][1]),
         tomorrow_condition=weather_label(int(daily["weather_code"][1])),
+        tomorrow_rain_prob=(
+            round(daily["precipitation_probability_max"][1])
+            if daily.get("precipitation_probability_max")
+            and daily["precipitation_probability_max"][1] is not None
+            else None
+        ),
     )
 
 
-def urlopen_with_retries(req: urllib.request.Request, *, timeout: int) -> bytes:
+def urlopen_with_retries(
+    req: urllib.request.Request, *, timeout: int
+) -> bytes:
     retryable_statuses = {429, 500, 502, 503, 504}
     attempts = max(1, http_retries())
     delay = max(0.0, http_retry_delay_seconds())
@@ -180,12 +210,18 @@ def urlopen_with_retries(req: urllib.request.Request, *, timeout: int) -> bytes:
                 raise
 
         logger.warning(
-            "HTTP retry %d/%d for %s: %s", attempt, attempts, req.full_url, last_error
+            "HTTP retry %d/%d for %s: %s",
+            attempt,
+            attempts,
+            req.full_url,
+            last_error,
         )
         if delay > 0:
             time_module.sleep(delay)
 
-    raise RuntimeError(f"HTTP request failed after {attempts} attempts: {last_error}")
+    raise RuntimeError(
+        f"HTTP request failed after {attempts} attempts: {last_error}"
+    )
 
 
 def request_json(
@@ -207,7 +243,9 @@ def request_json(
         data = urllib.parse.urlencode(form).encode("utf-8")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    req = urllib.request.Request(
+        url, data=data, headers=headers, method=method
+    )
     return json.loads(urlopen_with_retries(req, timeout=20).decode("utf-8"))
 
 
@@ -249,6 +287,8 @@ def fetch_air_quality() -> AirQuality:
             "latitude": lat,
             "longitude": lon,
             "current": "us_aqi,pm2_5,pm10",
+            "hourly": "us_aqi",
+            "forecast_days": "2",
             "timezone": timezone,
         },
     )
@@ -256,14 +296,60 @@ def fetch_air_quality() -> AirQuality:
     aqi = current.get("us_aqi")
     rounded_aqi = round(aqi) if aqi is not None else None
     pm25 = current.get("pm2_5")
+    hourly = data.get("hourly", {})
+    daily_aqi = daily_air_quality_summary(hourly)
     return AirQuality(
         aqi=rounded_aqi,
         label=air_quality_label(rounded_aqi),
         pm25=round(pm25, 1) if pm25 is not None else None,
+        today_min=daily_aqi.get("today_min"),
+        today_max=daily_aqi.get("today_max"),
+        today_peak_hour=daily_aqi.get("today_peak_hour"),
+        tomorrow_min=daily_aqi.get("tomorrow_min"),
+        tomorrow_max=daily_aqi.get("tomorrow_max"),
+        tomorrow_peak_hour=daily_aqi.get("tomorrow_peak_hour"),
     )
 
 
-def parse_todoist_due(due: dict, now: datetime) -> tuple[datetime, str, bool] | None:
+def summarize_aqi_points(
+    points: list[tuple[datetime, int]],
+) -> dict[str, int | str] | None:
+    if not points:
+        return None
+    min_value = min(value for _, value in points)
+    peak_time, max_value = max(points, key=lambda item: item[1])
+    return {
+        "min": min_value,
+        "max": max_value,
+        "peak_hour": peak_time.strftime("%H:%M"),
+    }
+
+
+def daily_air_quality_summary(hourly: dict) -> dict[str, int | str]:
+    times = hourly.get("time") or []
+    values = hourly.get("us_aqi") or []
+    parsed: list[tuple[datetime, int]] = []
+    for raw_time, raw_value in zip(times, values):
+        if raw_value is None:
+            continue
+        parsed.append((datetime.fromisoformat(raw_time), round(raw_value)))
+
+    days = sorted({item[0].date() for item in parsed})
+    summary: dict[str, int | str] = {}
+    for label, day in zip(("today", "tomorrow"), days[:2]):
+        day_points = [(dt, value) for dt, value in parsed if dt.date() == day]
+        day_summary = summarize_aqi_points(day_points)
+        if day_summary is None:
+            continue
+        summary[f"{label}_min"] = day_summary["min"]
+        summary[f"{label}_max"] = day_summary["max"]
+        summary[f"{label}_peak_hour"] = day_summary["peak_hour"]
+    return summary
+
+
+def parse_todoist_due(
+    due: dict, now: datetime
+) -> tuple[datetime, str, bool] | None:
     yesterday = date.fromordinal(now.date().toordinal() - 1)
 
     due_datetime = due.get("datetime")
@@ -292,7 +378,11 @@ def parse_todoist_due(due: dict, now: datetime) -> tuple[datetime, str, bool] | 
         parsed_date = date.fromisoformat(due_date)
         parsed = datetime.combine(parsed_date, time.min, tzinfo=now.tzinfo)
         if parsed_date < now.date():
-            label = "yesterday" if parsed_date == yesterday else parsed_date.strftime("%d/%m")
+            label = (
+                "yesterday"
+                if parsed_date == yesterday
+                else parsed_date.strftime("%d/%m")
+            )
             return parsed, label, True
         if parsed_date == now.date():
             return parsed, "today", False
@@ -341,7 +431,9 @@ def upload_to_ezdata(image_path: Path) -> dict:
         chunks.extend(
             [
                 f"--{boundary}\r\n".encode("utf-8"),
-                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(
+                    "utf-8"
+                ),
                 value.encode("utf-8"),
                 b"\r\n",
             ]
@@ -410,6 +502,36 @@ def centered_text(
     draw_text(draw, (x, y), text, size, color, bold)
 
 
+def draw_inline_centered(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    segments: list[tuple[str, int, str, bool]],
+    gap: int,
+) -> None:
+    x0, y0, x1, y1 = box
+    measured = []
+    total_width = 0
+    max_height = 0
+    for text, size, color, bold in segments:
+        f = font(size, bold)
+        bbox = draw.textbbox((0, 0), text, font=f)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        measured.append((text, size, color, bold, bbox, width, height))
+        total_width += width
+        max_height = max(max_height, height)
+    total_width += gap * max(0, len(measured) - 1)
+
+    x = x0 + (x1 - x0 - total_width) // 2
+    y = y0 + (y1 - y0 - max_height) // 2
+    for text, size, color, bold, bbox, width, height in measured:
+        segment_y = y + (max_height - height) // 2
+        draw_text(
+            draw, (x - bbox[0], segment_y - bbox[1]), text, size, color, bold
+        )
+        x += width + gap
+
+
 def draw_centered_stack(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
@@ -450,32 +572,60 @@ def draw_forecast_card(
     title_color: str,
     value: str,
     subtitle: str,
+    rain_prob: int | None,
     fill: str,
     outline: str,
     ink: str,
     muted: str,
+    aqi_min: int | None = None,
+    aqi_max: int | None = None,
+    peak_hour: str | None = None,
 ) -> None:
     card(draw, box, fill, outline)
-    draw_centered_stack(
+    aqi_line = (
+        f"AQI {aqi_min}-{aqi_max} pk {peak_hour[:2]}h"
+        if aqi_min is not None and aqi_max is not None and peak_hour
+        else "AQI n/a"
+    )
+    x0, y0, x1, _ = box
+    draw_inline_centered(
         draw,
-        box,
+        (x0 + 10, y0 + 12, x1 - 10, y0 + 28),
+        [(title, 14, title_color, True), (subtitle, 14, muted, False)],
+        gap=6,
+    )
+
+    rain_text = f"{rain_prob}%" if rain_prob is not None else "--"
+    draw_inline_centered(
+        draw,
+        (x0 + 10, y0 + 35, x1 - 10, y0 + 59),
         [
-            (title, 15, title_color, True),
-            (value, 27, ink, True),
-            (subtitle, 15, muted, False),
+            (value.replace(" / ", "/"), 20, ink, True),
+            (rain_text, 20, muted, False),
         ],
-        gap=5,
+        gap=13,
+    )
+    centered_text(
+        draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), aqi_line, 15, muted
     )
 
 
-def draw_section(draw: ImageDraw.ImageDraw, y: int, title: str, color: str) -> int:
+def draw_section(
+    draw: ImageDraw.ImageDraw, y: int, title: str, color: str
+) -> int:
     draw.rounded_rectangle((18, y, WIDTH - 18, y + 30), radius=6, fill=color)
     draw_text(draw, (30, y + 5), title.upper(), 16, "#ffffff", True)
     return y + 42
 
 
 def clipped_task(text: str, width: int = 26) -> list[str]:
-    return textwrap.wrap(text, width=width, break_long_words=False, max_lines=2, placeholder="...") or [""]
+    return textwrap.wrap(
+        text,
+        width=width,
+        break_long_words=False,
+        max_lines=2,
+        placeholder="...",
+    ) or [""]
 
 
 def measure_task_height(task: TodoistTask) -> int:
@@ -483,7 +633,15 @@ def measure_task_height(task: TodoistTask) -> int:
 
 
 def display_date(now: datetime) -> str:
-    weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    weekdays = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
     months = [
         "January",
         "February",
@@ -541,9 +699,13 @@ def generate_dashboard() -> Path:
     draw.rectangle((0, 0, WIDTH, 82), fill=ink)
     draw.rectangle((0, 82, WIDTH, 94), fill=yellow)
 
-    location = weather.location if weather else os.environ.get("WEATHER_LOCATION", "")
+    location = (
+        weather.location if weather else os.environ.get("WEATHER_LOCATION", "")
+    )
     draw_text(draw, (22, 16), display_date(now), 32, "#ffffff", True)
-    draw_text(draw, (24, 54), f"{location}  |  updated {now:%H:%M}", 17, "#ffffff")
+    draw_text(
+        draw, (24, 54), f"{location}  |  updated {now:%H:%M}", 17, "#ffffff"
+    )
 
     current_card = (18, 108, 191, 198)
     air_card = (209, 108, 382, 198)
@@ -559,7 +721,7 @@ def generate_dashboard() -> Path:
     else:
         current_lines = [
             ("--°", 42, ink, True),
-            ("clima n/d", 18, muted, False),
+            ("weather n/a", 18, muted, False),
         ]
     draw_centered_stack(draw, current_card, current_lines, gap=4)
 
@@ -569,7 +731,12 @@ def generate_dashboard() -> Path:
         air_card,
         [
             ("US AQI", 14, air_text, True),
-            (str(air.aqi if air.aqi is not None else "--"), 31, air_text, True),
+            (
+                str(air.aqi if air.aqi is not None else "--"),
+                31,
+                air_text,
+                True,
+            ),
             (air.label, 14, air_subtext, False),
         ],
         gap=4,
@@ -580,24 +747,36 @@ def generate_dashboard() -> Path:
         today_card,
         "TODAY",
         red,
-        f"{weather.today_low}° / {weather.today_high}°" if weather else "n/d",
-        weather.today_condition if weather else "clima n/d",
+        f"{weather.today_low}° / {weather.today_high}°" if weather else "n/a",
+        weather.today_condition if weather else "weather n/a",
+        weather.today_rain_prob if weather else None,
         cream,
         line,
         ink,
         muted,
+        air.today_min,
+        air.today_max,
+        air.today_peak_hour,
     )
     draw_forecast_card(
         draw,
         tomorrow_card,
         "TOMORROW",
         green,
-        f"{weather.tomorrow_low}° / {weather.tomorrow_high}°" if weather else "n/d",
-        weather.tomorrow_condition if weather else "clima n/d",
+        (
+            f"{weather.tomorrow_low}° / {weather.tomorrow_high}°"
+            if weather
+            else "n/a"
+        ),
+        weather.tomorrow_condition if weather else "weather n/a",
+        weather.tomorrow_rain_prob if weather else None,
         cream,
         line,
         ink,
         muted,
+        air.tomorrow_min,
+        air.tomorrow_max,
+        air.tomorrow_peak_hour,
     )
 
     y = 330
@@ -624,24 +803,51 @@ def generate_dashboard() -> Path:
             marker_color = red if task.overdue else muted
             draw_text(draw, (28, task_y), marker, 20, marker_color, True)
             lines = clipped_task(task.content)
-            draw_text(draw, (56, task_y), lines[0], 20, priority_color, task.priority >= 4)
+            draw_text(
+                draw,
+                (56, task_y),
+                lines[0],
+                20,
+                priority_color,
+                task.priority >= 4,
+            )
             label_color = red if task.overdue else muted
-            draw_text(draw, (306, task_y + 2), task.due_label, 15, label_color, task.overdue)
+            draw_text(
+                draw,
+                (306, task_y + 2),
+                task.due_label,
+                15,
+                label_color,
+                task.overdue,
+            )
             if len(lines) > 1:
                 draw_text(draw, (56, task_y + 22), lines[1], 17, muted)
             task_y += task_height
             shown_count += 1
 
         if hidden_count > 0 and task_y <= 574:
-            draw_text(draw, (56, task_y + 2), f"+{hidden_count} more", 17, muted, True)
+            draw_text(
+                draw,
+                (56, task_y + 2),
+                f"+{hidden_count} more",
+                17,
+                muted,
+                True,
+            )
 
     img.save(OUT)
     return OUT.resolve()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate a PaperColor dashboard image.")
-    parser.add_argument("--upload", action="store_true", help="Upload the generated image to EzData.")
+    parser = argparse.ArgumentParser(
+        description="Generate a PaperColor dashboard image."
+    )
+    parser.add_argument(
+        "--upload",
+        action="store_true",
+        help="Upload the generated image to EzData.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -658,7 +864,9 @@ def main() -> None:
         if code == 200:
             logger.info("Image uploaded to EzData (code=%s msg=%s)", code, msg)
         else:
-            logger.error("EzData rejected the upload (code=%s msg=%s)", code, msg)
+            logger.error(
+                "EzData rejected the upload (code=%s msg=%s)", code, msg
+            )
 
 
 if __name__ == "__main__":
