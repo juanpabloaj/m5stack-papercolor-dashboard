@@ -756,7 +756,7 @@ def generate_dashboard() -> Path:
     draw_text(draw, (22, 16), display_date(now), 32, "#ffffff", True)
     draw_text(draw, (24, 54), f"{location}  |  {solar_text}", 17, "#ffffff")
     centered_text_at_y(draw, 292, 382, 16, f"{now:%H:%M}", 32, "#ffffff", True)
-    centered_text_at_y(draw, 292, 382, 54, "updated", 17, "#ffffff")
+    centered_text_at_y(draw, 294, 382, 54, "updated", 17, "#ffffff")
 
     current_card = (18, 108, 191, 198)
     air_card = (209, 108, 382, 198)
