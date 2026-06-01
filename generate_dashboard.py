@@ -629,7 +629,7 @@ def draw_forecast_card(
 ) -> None:
     card(draw, box, fill, outline)
     aqi_line = (
-        f"AQI {aqi_min}-{aqi_max} pk {peak_hour[:2]}h"
+        f"AQI {aqi_min}-{aqi_max}  {peak_hour[:2]}h"
         if aqi_min is not None and aqi_max is not None and peak_hour
         else "AQI n/a"
     )
@@ -652,7 +652,7 @@ def draw_forecast_card(
         gap=13,
     )
     centered_text(
-        draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), aqi_line, 16, muted
+        draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), aqi_line, 18, muted
     )
 
 
