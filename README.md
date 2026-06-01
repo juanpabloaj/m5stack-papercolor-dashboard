@@ -1,5 +1,8 @@
 # M5Stack PaperColor EzData Notes
 
+<img width="600" height="867" alt="colorpaper" src="https://github.com/user-attachments/assets/927d1c29-6ee9-475f-82de-3cc41957a786" />
+
+
 Unofficial project, not affiliated with M5Stack.
 
 This repo contains notes and local test assets for pushing images to an M5Stack PaperColor device through M5Stack EzData2.
