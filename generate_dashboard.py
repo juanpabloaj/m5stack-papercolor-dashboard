@@ -92,6 +92,10 @@ def http_retry_delay_seconds() -> float:
     return float(os.environ.get("HTTP_RETRY_DELAY_SECONDS", "5"))
 
 
+def http_timeout_seconds(default: int = 20) -> int:
+    return int(os.environ.get("HTTP_TIMEOUT_SECONDS", str(default)))
+
+
 def display_safe(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text)
     ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
@@ -276,7 +280,11 @@ def request_json(
     req = urllib.request.Request(
         url, data=data, headers=headers, method=method
     )
-    return json.loads(urlopen_with_retries(req, timeout=20).decode("utf-8"))
+    return json.loads(
+        urlopen_with_retries(req, timeout=http_timeout_seconds()).decode(
+            "utf-8"
+        )
+    )
 
 
 def air_quality_label(aqi: int | None) -> str:
@@ -494,7 +502,11 @@ def upload_to_ezdata(image_path: Path) -> dict:
         },
         method="POST",
     )
-    return json.loads(urlopen_with_retries(req, timeout=30).decode("utf-8"))
+    return json.loads(
+        urlopen_with_retries(
+            req, timeout=http_timeout_seconds(default=30)
+        ).decode("utf-8")
+    )
 
 
 def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
