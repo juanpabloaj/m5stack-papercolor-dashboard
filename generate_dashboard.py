@@ -36,10 +36,12 @@ class Weather:
     today_high: int
     today_condition: str
     today_rain_prob: int | None
+    today_rain_hour: str | None
     tomorrow_low: int
     tomorrow_high: int
     tomorrow_condition: str
     tomorrow_rain_prob: int | None
+    tomorrow_rain_hour: str | None
     next_solar_time: str | None
     next_solar_label: str | None
 
@@ -151,6 +153,27 @@ def next_solar_event(
     return event_time.strftime("%H:%M"), label
 
 
+def rain_start_hours(hourly: dict, now: datetime) -> dict[date, str]:
+    times = hourly.get("time") or []
+    values = hourly.get("precipitation_probability") or []
+    starts: dict[date, str] = {}
+
+    for raw_time, raw_value in zip(times, values):
+        if raw_value is None or raw_value <= 0:
+            continue
+
+        parsed = datetime.fromisoformat(raw_time)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=now.tzinfo)
+        parsed = parsed.astimezone(now.tzinfo)
+        if parsed.date() == now.date() and parsed < now:
+            continue
+
+        starts.setdefault(parsed.date(), parsed.strftime("%Hh"))
+
+    return starts
+
+
 def fetch_weather(now: datetime | None = None) -> Weather:
     load_dotenv()
     lat = required_env("WEATHER_LAT")
@@ -181,6 +204,7 @@ def fetch_weather(now: datetime | None = None) -> Weather:
                 "sunset",
             ]
         ),
+        "hourly": "precipitation_probability",
         "timezone": timezone,
         "forecast_days": "2",
     }
@@ -190,6 +214,7 @@ def fetch_weather(now: datetime | None = None) -> Weather:
 
     current = data["current"]
     daily = data["daily"]
+    rain_starts = rain_start_hours(data.get("hourly", {}), now)
     next_solar_time, next_solar_label = next_solar_event(daily, now)
     return Weather(
         location=location,
@@ -207,6 +232,7 @@ def fetch_weather(now: datetime | None = None) -> Weather:
             and daily["precipitation_probability_max"][0] is not None
             else None
         ),
+        today_rain_hour=rain_starts.get(now.date()),
         tomorrow_low=round(daily["temperature_2m_min"][1]),
         tomorrow_high=round(daily["temperature_2m_max"][1]),
         tomorrow_condition=weather_label(int(daily["weather_code"][1])),
@@ -215,6 +241,9 @@ def fetch_weather(now: datetime | None = None) -> Weather:
             if daily.get("precipitation_probability_max")
             and daily["precipitation_probability_max"][1] is not None
             else None
+        ),
+        tomorrow_rain_hour=rain_starts.get(
+            date.fromordinal(now.date().toordinal() + 1)
         ),
         next_solar_time=next_solar_time,
         next_solar_label=next_solar_label,
@@ -635,6 +664,7 @@ def draw_forecast_card(
     outline: str,
     ink: str,
     muted: str,
+    rain_hour: str | None = None,
     aqi_min: int | None = None,
     aqi_max: int | None = None,
     peak_hour: str | None = None,
@@ -654,14 +684,16 @@ def draw_forecast_card(
     )
 
     rain_text = f"{rain_prob}%" if rain_prob is not None else "--"
+    if rain_prob and rain_hour:
+        rain_text = f"{rain_text} {rain_hour}"
     draw_inline_centered(
         draw,
         (x0 + 10, y0 + 35, x1 - 10, y0 + 59),
         [
-            (value.replace(" / ", "/"), 20, ink, True),
-            (rain_text, 20, muted, False),
+            (value.replace(" / ", "/"), 19, ink, True),
+            (rain_text, 19, muted, False),
         ],
-        gap=13,
+        gap=9,
     )
     centered_text(
         draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), aqi_line, 18, muted
@@ -817,6 +849,7 @@ def generate_dashboard() -> Path:
         line,
         ink,
         muted,
+        weather.today_rain_hour if weather else None,
         air.today_min,
         air.today_max,
         air.today_peak_hour,
@@ -837,6 +870,7 @@ def generate_dashboard() -> Path:
         line,
         ink,
         muted,
+        weather.tomorrow_rain_hour if weather else None,
         air.tomorrow_min,
         air.tomorrow_max,
         air.tomorrow_peak_hour,
