@@ -733,17 +733,18 @@ def draw_forecast_card(
         gap=6,
     )
 
+    rain_segments: list[tuple[str, int, str, bool]] = [
+        (value.replace(" / ", "/"), 19, ink, True)
+    ]
     rain_text = f"{rain_prob}%" if rain_prob is not None else "--"
+    rain_segments.append((rain_text, 19, muted, False))
     if rain_prob and rain_hour:
-        rain_text = f"{rain_text} {rain_hour}"
+        rain_segments.append((rain_hour, 19, muted, rain_prob > 50))
     draw_inline_centered(
         draw,
         (x0 + 10, y0 + 35, x1 - 10, y0 + 59),
-        [
-            (value.replace(" / ", "/"), 19, ink, True),
-            (rain_text, 19, muted, False),
-        ],
-        gap=9,
+        rain_segments,
+        gap=7,
     )
     centered_text(
         draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), aqi_line, 18, muted
