@@ -153,25 +153,60 @@ def next_solar_event(
     return event_time.strftime("%H:%M"), label
 
 
-def rain_start_hours(hourly: dict, now: datetime) -> dict[date, str]:
+def rain_probability_summary(
+    hourly: dict, now: datetime
+) -> dict[date, tuple[int, str | None]]:
     times = hourly.get("time") or []
     values = hourly.get("precipitation_probability") or []
-    starts: dict[date, str] = {}
+    if not times or not values:
+        return {}
+
+    today = now.date()
+    tomorrow = date.fromordinal(today.toordinal() + 1)
+    points: dict[date, list[tuple[datetime, int]]] = {
+        today: [],
+        tomorrow: [],
+    }
 
     for raw_time, raw_value in zip(times, values):
-        if raw_value is None or raw_value <= 0:
+        if raw_value is None:
             continue
 
         parsed = datetime.fromisoformat(raw_time)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=now.tzinfo)
         parsed = parsed.astimezone(now.tzinfo)
-        if parsed.date() == now.date() and parsed < now:
+        if parsed.date() == today and parsed < now:
+            continue
+        if parsed.date() not in points:
             continue
 
-        starts.setdefault(parsed.date(), parsed.strftime("%Hh"))
+        points[parsed.date()].append((parsed, round(raw_value)))
 
-    return starts
+    summary: dict[date, tuple[int, str | None]] = {}
+    for day, day_points in points.items():
+        if not day_points:
+            summary[day] = (0, None)
+            continue
+
+        max_probability = max(value for _, value in day_points)
+        first_rain = next(
+            (dt for dt, value in day_points if value > 0),
+            None,
+        )
+        summary[day] = (
+            max_probability,
+            first_rain.strftime("%Hh") if first_rain else None,
+        )
+
+    return summary
+
+
+def daily_rain_probability(daily: dict, index: int) -> int | None:
+    values = daily.get("precipitation_probability_max")
+    if not values or len(values) <= index or values[index] is None:
+        return None
+    return round(values[index])
 
 
 def fetch_weather(now: datetime | None = None) -> Weather:
@@ -214,7 +249,16 @@ def fetch_weather(now: datetime | None = None) -> Weather:
 
     current = data["current"]
     daily = data["daily"]
-    rain_starts = rain_start_hours(data.get("hourly", {}), now)
+    rain_summary = rain_probability_summary(data.get("hourly", {}), now)
+    today_rain_prob, today_rain_hour = rain_summary.get(
+        now.date(),
+        (daily_rain_probability(daily, 0), None),
+    )
+    tomorrow = date.fromordinal(now.date().toordinal() + 1)
+    tomorrow_rain_prob, tomorrow_rain_hour = rain_summary.get(
+        tomorrow,
+        (daily_rain_probability(daily, 1), None),
+    )
     next_solar_time, next_solar_label = next_solar_event(daily, now)
     return Weather(
         location=location,
@@ -226,25 +270,13 @@ def fetch_weather(now: datetime | None = None) -> Weather:
         today_low=round(daily["temperature_2m_min"][0]),
         today_high=round(daily["temperature_2m_max"][0]),
         today_condition=weather_label(int(daily["weather_code"][0])),
-        today_rain_prob=(
-            round(daily["precipitation_probability_max"][0])
-            if daily.get("precipitation_probability_max")
-            and daily["precipitation_probability_max"][0] is not None
-            else None
-        ),
-        today_rain_hour=rain_starts.get(now.date()),
+        today_rain_prob=today_rain_prob,
+        today_rain_hour=today_rain_hour,
         tomorrow_low=round(daily["temperature_2m_min"][1]),
         tomorrow_high=round(daily["temperature_2m_max"][1]),
         tomorrow_condition=weather_label(int(daily["weather_code"][1])),
-        tomorrow_rain_prob=(
-            round(daily["precipitation_probability_max"][1])
-            if daily.get("precipitation_probability_max")
-            and daily["precipitation_probability_max"][1] is not None
-            else None
-        ),
-        tomorrow_rain_hour=rain_starts.get(
-            date.fromordinal(now.date().toordinal() + 1)
-        ),
+        tomorrow_rain_prob=tomorrow_rain_prob,
+        tomorrow_rain_hour=tomorrow_rain_hour,
         next_solar_time=next_solar_time,
         next_solar_label=next_solar_label,
     )
@@ -344,10 +376,11 @@ def air_quality_style(aqi: int | None) -> tuple[str, str, str]:
     return "#ce3328", "#ffffff", "#ffffff"
 
 
-def fetch_air_quality() -> AirQuality:
+def fetch_air_quality(now: datetime | None = None) -> AirQuality:
     lat = required_env("WEATHER_LAT")
     lon = required_env("WEATHER_LON")
     timezone = required_env("WEATHER_TIMEZONE")
+    now = now or datetime.now(ZoneInfo(timezone))
     data = request_json(
         "https://air-quality-api.open-meteo.com/v1/air-quality",
         params={
@@ -364,7 +397,7 @@ def fetch_air_quality() -> AirQuality:
     rounded_aqi = round(aqi) if aqi is not None else None
     pm25 = current.get("pm2_5")
     hourly = data.get("hourly", {})
-    daily_aqi = daily_air_quality_summary(hourly)
+    daily_aqi = daily_air_quality_summary(hourly, now)
     return AirQuality(
         aqi=rounded_aqi,
         label=air_quality_label(rounded_aqi),
@@ -392,19 +425,36 @@ def summarize_aqi_points(
     }
 
 
-def daily_air_quality_summary(hourly: dict) -> dict[str, int | str]:
+def daily_air_quality_summary(
+    hourly: dict, now: datetime
+) -> dict[str, int | str]:
     times = hourly.get("time") or []
     values = hourly.get("us_aqi") or []
-    parsed: list[tuple[datetime, int]] = []
+    today = now.date()
+    tomorrow = date.fromordinal(today.toordinal() + 1)
+    points: dict[date, list[tuple[datetime, int]]] = {
+        today: [],
+        tomorrow: [],
+    }
+
     for raw_time, raw_value in zip(times, values):
         if raw_value is None:
             continue
-        parsed.append((datetime.fromisoformat(raw_time), round(raw_value)))
 
-    days = sorted({item[0].date() for item in parsed})
+        parsed = datetime.fromisoformat(raw_time)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=now.tzinfo)
+        parsed = parsed.astimezone(now.tzinfo)
+        if parsed.date() == today and parsed < now:
+            continue
+        if parsed.date() not in points:
+            continue
+
+        points[parsed.date()].append((parsed, round(raw_value)))
+
     summary: dict[str, int | str] = {}
-    for label, day in zip(("today", "tomorrow"), days[:2]):
-        day_points = [(dt, value) for dt, value in parsed if dt.date() == day]
+    for label, day in (("today", today), ("tomorrow", tomorrow)):
+        day_points = points[day]
         day_summary = summarize_aqi_points(day_points)
         if day_summary is None:
             continue
@@ -761,7 +811,7 @@ def generate_dashboard() -> Path:
         weather = None
 
     try:
-        air = fetch_air_quality()
+        air = fetch_air_quality(now)
     except Exception as exc:
         logger.warning("Could not fetch air quality: %s", exc)
         air = AirQuality(aqi=None, label="--", pm25=None)
