@@ -348,19 +348,19 @@ def request_json(
     )
 
 
-def air_quality_label(aqi: int | None) -> str:
-    if aqi is None:
+def pm25_label(pm25: float | None) -> str:
+    if pm25 is None:
         return "--"
-    if aqi <= 50:
+    if pm25 <= 12:
         return "Good"
-    if aqi <= 100:
+    if pm25 <= 35.4:
         return "Moderate"
-    if aqi <= 150:
-        return "USG"
-    if aqi <= 200:
+    if pm25 <= 55.4:
+        return "U. sensitive groups"
+    if pm25 <= 150.4:
         return "Unhealthy"
-    if aqi <= 300:
-        return "Very bad"
+    if pm25 <= 250.4:
+        return "Very unhealthy"
     return "Hazardous"
 
 
@@ -400,7 +400,7 @@ def fetch_air_quality(now: datetime | None = None) -> AirQuality:
     pm25_forecast = daily_pm25_summary(hourly, now)
     return AirQuality(
         aqi=rounded_aqi,
-        label=air_quality_label(rounded_aqi),
+        label=pm25_label(pm25),
         pm25=round(pm25, 1) if pm25 is not None else None,
         today_pm25_min=pm25_forecast.get("today_min"),
         today_pm25_max=pm25_forecast.get("today_max"),
