@@ -51,12 +51,12 @@ class AirQuality:
     aqi: int | None
     label: str
     pm25: float | None
-    today_min: int | None = None
-    today_max: int | None = None
-    today_peak_hour: str | None = None
-    tomorrow_min: int | None = None
-    tomorrow_max: int | None = None
-    tomorrow_peak_hour: str | None = None
+    today_pm25_min: int | None = None
+    today_pm25_max: int | None = None
+    today_pm25_peak_hour: str | None = None
+    tomorrow_pm25_min: int | None = None
+    tomorrow_pm25_max: int | None = None
+    tomorrow_pm25_peak_hour: str | None = None
 
 
 @dataclass(frozen=True)
@@ -364,14 +364,14 @@ def air_quality_label(aqi: int | None) -> str:
     return "Hazardous"
 
 
-def air_quality_style(aqi: int | None) -> tuple[str, str, str]:
-    if aqi is None:
+def pm25_style(pm25: float | None) -> tuple[str, str, str]:
+    if pm25 is None:
         return "#ffffff", "#245aa6", "#5c6270"
-    if aqi <= 50:
+    if pm25 <= 12:
         return "#ffffff", "#245aa6", "#5c6270"
-    if aqi <= 100:
+    if pm25 <= 35.4:
         return "#f4efe3", "#121417", "#5c6270"
-    if aqi <= 150:
+    if pm25 <= 55.4:
         return "#e6b53b", "#121417", "#3d3420"
     return "#ce3328", "#ffffff", "#ffffff"
 
@@ -386,8 +386,8 @@ def fetch_air_quality(now: datetime | None = None) -> AirQuality:
         params={
             "latitude": lat,
             "longitude": lon,
-            "current": "us_aqi,pm2_5,pm10",
-            "hourly": "us_aqi",
+            "current": "us_aqi,pm2_5",
+            "hourly": "pm2_5",
             "forecast_days": "2",
             "timezone": timezone,
         },
@@ -397,42 +397,42 @@ def fetch_air_quality(now: datetime | None = None) -> AirQuality:
     rounded_aqi = round(aqi) if aqi is not None else None
     pm25 = current.get("pm2_5")
     hourly = data.get("hourly", {})
-    daily_aqi = daily_air_quality_summary(hourly, now)
+    pm25_forecast = daily_pm25_summary(hourly, now)
     return AirQuality(
         aqi=rounded_aqi,
         label=air_quality_label(rounded_aqi),
         pm25=round(pm25, 1) if pm25 is not None else None,
-        today_min=daily_aqi.get("today_min"),
-        today_max=daily_aqi.get("today_max"),
-        today_peak_hour=daily_aqi.get("today_peak_hour"),
-        tomorrow_min=daily_aqi.get("tomorrow_min"),
-        tomorrow_max=daily_aqi.get("tomorrow_max"),
-        tomorrow_peak_hour=daily_aqi.get("tomorrow_peak_hour"),
+        today_pm25_min=pm25_forecast.get("today_min"),
+        today_pm25_max=pm25_forecast.get("today_max"),
+        today_pm25_peak_hour=pm25_forecast.get("today_peak_hour"),
+        tomorrow_pm25_min=pm25_forecast.get("tomorrow_min"),
+        tomorrow_pm25_max=pm25_forecast.get("tomorrow_max"),
+        tomorrow_pm25_peak_hour=pm25_forecast.get("tomorrow_peak_hour"),
     )
 
 
-def summarize_aqi_points(
-    points: list[tuple[datetime, int]],
+def summarize_pm25_points(
+    points: list[tuple[datetime, float]],
 ) -> dict[str, int | str] | None:
     if not points:
         return None
-    min_value = min(value for _, value in points)
+    min_value = round(min(value for _, value in points))
     peak_time, max_value = max(points, key=lambda item: item[1])
     return {
         "min": min_value,
-        "max": max_value,
+        "max": round(max_value),
         "peak_hour": peak_time.strftime("%H:%M"),
     }
 
 
-def daily_air_quality_summary(
+def daily_pm25_summary(
     hourly: dict, now: datetime
 ) -> dict[str, int | str]:
     times = hourly.get("time") or []
-    values = hourly.get("us_aqi") or []
+    values = hourly.get("pm2_5") or []
     today = now.date()
     tomorrow = date.fromordinal(today.toordinal() + 1)
-    points: dict[date, list[tuple[datetime, int]]] = {
+    points: dict[date, list[tuple[datetime, float]]] = {
         today: [],
         tomorrow: [],
     }
@@ -450,12 +450,12 @@ def daily_air_quality_summary(
         if parsed.date() not in points:
             continue
 
-        points[parsed.date()].append((parsed, round(raw_value)))
+        points[parsed.date()].append((parsed, float(raw_value)))
 
     summary: dict[str, int | str] = {}
     for label, day in (("today", today), ("tomorrow", tomorrow)):
         day_points = points[day]
-        day_summary = summarize_aqi_points(day_points)
+        day_summary = summarize_pm25_points(day_points)
         if day_summary is None:
             continue
         summary[f"{label}_min"] = day_summary["min"]
@@ -608,6 +608,34 @@ def draw_text(
         draw.text((xy[0] + 1, xy[1]), text, fill=color, font=font(size, bold))
 
 
+def fitted_text_size(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    max_width: int,
+    preferred_size: int,
+    min_size: int,
+    bold: bool = False,
+) -> int:
+    for size in range(preferred_size, min_size - 1, -1):
+        bbox = draw.textbbox((0, 0), text, font=font(size, bold))
+        if bbox[2] - bbox[0] <= max_width:
+            return size
+    return min_size
+
+
+def draw_text_at_visible_top(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    size: int,
+    color: str,
+    bold: bool = False,
+) -> None:
+    bbox = draw.textbbox((0, 0), text, font=font(size, bold))
+    draw_text(draw, (xy[0] - bbox[0], xy[1] - bbox[1]), text, size, color, bold)
+
+
 def centered_text(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
@@ -715,15 +743,15 @@ def draw_forecast_card(
     ink: str,
     muted: str,
     rain_hour: str | None = None,
-    aqi_min: int | None = None,
-    aqi_max: int | None = None,
+    pm25_min: int | None = None,
+    pm25_max: int | None = None,
     peak_hour: str | None = None,
 ) -> None:
     card(draw, box, fill, outline)
-    aqi_line = (
-        f"AQI {aqi_min}-{aqi_max}  {peak_hour[:2]}h"
-        if aqi_min is not None and aqi_max is not None and peak_hour
-        else "AQI n/a"
+    pm25_line = (
+        f"PM2.5 {pm25_min}-{pm25_max} {peak_hour[:2]}h"
+        if pm25_min is not None and pm25_max is not None and peak_hour
+        else "PM2.5 n/a"
     )
     x0, y0, x1, _ = box
     draw_inline_centered(
@@ -747,7 +775,7 @@ def draw_forecast_card(
         gap=7,
     )
     centered_text(
-        draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), aqi_line, 18, muted
+        draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), pm25_line, 16, muted
     )
 
 
@@ -834,7 +862,7 @@ def generate_dashboard() -> Path:
     yellow = "#e6b53b"
     cream = "#f4efe3"
     line = "#d8d0bf"
-    air_fill, air_text, air_subtext = air_quality_style(air.aqi)
+    air_fill, air_text, air_subtext = pm25_style(air.pm25)
 
     draw.rectangle((0, 0, WIDTH, HEIGHT), fill="#fbfaf4")
     draw.rectangle((0, 0, WIDTH, 82), fill=ink)
@@ -848,9 +876,33 @@ def generate_dashboard() -> Path:
         if weather and weather.next_solar_time and weather.next_solar_label
         else f"updated {now:%H:%M}"
     )
-    draw_text(draw, (22, 16), display_date(now), 32, "#ffffff", True)
+    date_text = display_date(now)
+    date_size = fitted_text_size(
+        draw,
+        date_text,
+        max_width=258,
+        preferred_size=32,
+        min_size=25,
+        bold=True,
+    )
+    header_text_top = 23
+    draw_text_at_visible_top(
+        draw, (22, header_text_top), date_text, date_size, "#ffffff", True
+    )
     draw_text(draw, (24, 54), f"{location}  |  {solar_text}", 17, "#ffffff")
-    centered_text_at_y(draw, 292, 382, 16, f"{now:%H:%M}", 32, "#ffffff", True)
+    time_text = f"{now:%H:%M}"
+    time_font = font(32, True)
+    time_bbox = draw.textbbox((0, 0), time_text, font=time_font)
+    time_width = time_bbox[2] - time_bbox[0]
+    time_x = 292 + (382 - 292 - time_width) // 2
+    draw_text_at_visible_top(
+        draw,
+        (time_x, header_text_top),
+        time_text,
+        32,
+        "#ffffff",
+        True,
+    )
     centered_text_at_y(draw, 294, 382, 54, "updated", 17, "#ffffff")
 
     current_card = (18, 108, 191, 198)
@@ -874,18 +926,27 @@ def generate_dashboard() -> Path:
     card(draw, air_card, air_fill, line)
     draw_centered_stack(
         draw,
-        air_card,
+        (air_card[0] + 8, air_card[1] + 8, air_card[2] - 8, air_card[3] - 8),
         [
-            ("US AQI", 14, air_text, True),
             (
-                str(air.aqi if air.aqi is not None else "--"),
-                31,
+                f"AQI {air.aqi}" if air.aqi is not None else "AQI --",
+                14,
+                air_text,
+                True,
+            ),
+            (
+                (
+                    f"PM2.5 {round(air.pm25)}"
+                    if air.pm25 is not None
+                    else "PM2.5 --"
+                ),
+                24,
                 air_text,
                 True,
             ),
             (air.label, 14, air_subtext, False),
         ],
-        gap=4,
+        gap=7,
     )
 
     draw_forecast_card(
@@ -901,9 +962,9 @@ def generate_dashboard() -> Path:
         ink,
         muted,
         weather.today_rain_hour if weather else None,
-        air.today_min,
-        air.today_max,
-        air.today_peak_hour,
+        air.today_pm25_min,
+        air.today_pm25_max,
+        air.today_pm25_peak_hour,
     )
     draw_forecast_card(
         draw,
@@ -922,9 +983,9 @@ def generate_dashboard() -> Path:
         ink,
         muted,
         weather.tomorrow_rain_hour if weather else None,
-        air.tomorrow_min,
-        air.tomorrow_max,
-        air.tomorrow_peak_hour,
+        air.tomorrow_pm25_min,
+        air.tomorrow_pm25_max,
+        air.tomorrow_pm25_peak_hour,
     )
 
     y = 330

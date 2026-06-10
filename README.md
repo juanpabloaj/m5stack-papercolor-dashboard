@@ -71,10 +71,11 @@ curl -sS -X POST 'https://ezdata2.m5stack.com/api/v2/device/uploadDeviceFile' \
 
 The included `generate_dashboard.py` script creates a `400x600` dashboard PNG.
 It reads weather location settings from `.env`, fetches current weather plus
-today/tomorrow forecast from Open-Meteo, fetches current US AQI air-quality data
-from Open-Meteo Air Quality, queries Todoist with `TODOIST_QUERY`, and renders
-active tasks due today or overdue. Tasks are sorted by due time/date, overdue
-tasks are marked in red with `!`, and hidden overflow is summarized as `+N more`.
+today/tomorrow forecast from Open-Meteo, fetches current PM2.5 and 24-hour US AQI
+air-quality data plus hourly PM2.5 forecasts from Open-Meteo Air Quality, queries
+Todoist with `TODOIST_QUERY`, and renders active tasks due today or overdue.
+Tasks are sorted by due time/date, overdue tasks are marked in red with `!`, and
+hidden overflow is summarized as `+N more`.
 
 ```sh
 uv run python generate_dashboard.py
