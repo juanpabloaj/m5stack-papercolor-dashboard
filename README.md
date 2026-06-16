@@ -14,6 +14,29 @@ This repo contains notes and local test assets for pushing images to an M5Stack 
 - Native image size: `400x600`
 - The factory firmware supports remote image updates through EzData Mode.
 
+## Display Palette (avoid dithering)
+
+The panel is an **E Ink Spectra 6** (driver `ED2208`) with only six native
+inks. The firmware quantizes every uploaded image to the nearest of these and
+then diffuses the quantization error, so any other color renders grainy (the
+"dirty color" look). Use only these exact values for flat fills and text and
+they stay solid — a pixel that already equals a palette entry has zero error to
+diffuse. Values are copied from the firmware's nearest-color table
+(`M5GFX Panel_ED2208.cpp` `epd_palette[]`):
+
+| Color  | RGB           | Hex       |
+|--------|---------------|-----------|
+| Black  | 0, 0, 0       | `#000000` |
+| White  | 255, 255, 255 | `#ffffff` |
+| Yellow | 255, 243, 56  | `#fff338` |
+| Red    | 191, 0, 0     | `#bf0000` |
+| Blue   | 100, 64, 255  | `#6440ff` |
+| Green  | 67, 138, 28   | `#438a1c` |
+
+There is no native gray, cream, or orange — map those to black or white.
+`generate_dashboard.py` exposes these as the `EPD_*` constants and uses them
+exclusively, so the whole dashboard renders without dithering.
+
 ## EzData Image Upload
 
 The EzData2 HTTP file upload endpoint is:

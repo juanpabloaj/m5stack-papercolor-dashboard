@@ -22,6 +22,20 @@ WIDTH = 400
 HEIGHT = 600
 OUT = Path("papercolor_dashboard_test.png")
 
+# E Ink Spectra 6 native palette — the ONLY six colors the PaperColor panel
+# (ED2208) renders WITHOUT dithering. The firmware quantizes every uploaded
+# pixel to the nearest of these via a nearest-color table and then diffuses the
+# error, which is the grainy "dirty color" look. A pixel that already equals one
+# of these has zero error, so flat fills stay solid. Values copied verbatim from
+# the firmware: M5GFX Panel_ED2208.cpp epd_palette[] (same path the EzData image
+# takes). There is no native gray, cream or orange — map those to black/white.
+EPD_BLACK = "#000000"   # 0, 0, 0
+EPD_WHITE = "#ffffff"   # 255, 255, 255
+EPD_YELLOW = "#fff338"  # 255, 243, 56
+EPD_RED = "#bf0000"     # 191, 0, 0
+EPD_BLUE = "#6440ff"    # 100, 64, 255
+EPD_GREEN = "#438a1c"   # 67, 138, 28
+
 logger = logging.getLogger("papercolor_dashboard")
 
 
@@ -374,15 +388,28 @@ def pm25_label(pm25: float | None) -> str:
 
 
 def pm25_style(pm25: float | None) -> tuple[str, str, str]:
-    if pm25 is None:
-        return "#ffffff", "#245aa6", "#5c6270"
-    if pm25 <= 12:
-        return "#ffffff", "#245aa6", "#5c6270"
+    if pm25 is None or pm25 <= 12:
+        return EPD_WHITE, EPD_BLUE, EPD_BLACK
     if pm25 <= 35.4:
-        return "#f4efe3", "#121417", "#5c6270"
+        return EPD_WHITE, EPD_BLACK, EPD_BLACK
     if pm25 <= 55.4:
-        return "#e6b53b", "#121417", "#3d3420"
-    return "#ce3328", "#ffffff", "#ffffff"
+        return EPD_YELLOW, EPD_BLACK, EPD_BLACK
+    return EPD_RED, EPD_WHITE, EPD_WHITE
+
+
+WARM_TEMP_C = 18
+
+
+def temp_style(temp_c: int | None) -> tuple[str, str, str]:
+    """Return (card_fill, temp_color, condition_color) for the weather card.
+
+    At/above WARM_TEMP_C the card switches to the panel's native yellow so it
+    pops on the Spectra 6 e-paper. All values come from the native palette, so
+    the fill stays solid instead of grainy.
+    """
+    if temp_c is not None and temp_c >= WARM_TEMP_C:
+        return EPD_YELLOW, EPD_BLACK, EPD_BLACK
+    return EPD_WHITE, EPD_BLACK, EPD_BLACK
 
 
 def fetch_air_quality(now: datetime | None = None) -> AirQuality:
@@ -590,7 +617,7 @@ def draw_text(
     xy: tuple[int, int],
     text: str,
     size: int,
-    color: str = "#111111",
+    color: str = EPD_BLACK,
     bold: bool = False,
 ) -> None:
     draw.text(xy, text, fill=color, font=font(size))
@@ -713,8 +740,8 @@ def draw_centered_stack(
 def card(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
-    fill: str = "#ffffff",
-    outline: str = "#d7d2c4",
+    fill: str = EPD_WHITE,
+    outline: str = EPD_BLACK,
 ) -> None:
     draw.rounded_rectangle(box, radius=8, fill=fill, outline=outline, width=2)
 
@@ -772,7 +799,7 @@ def draw_section(
     draw: ImageDraw.ImageDraw, y: int, title: str, color: str
 ) -> None:
     draw.rounded_rectangle((18, y, WIDTH - 18, y + 30), radius=6, fill=color)
-    draw_text(draw, (30, y + 5), title.upper(), 16, "#ffffff", True)
+    draw_text(draw, (30, y + 5), title.upper(), 16, EPD_WHITE, True)
 
 
 def clipped_task(text: str, width: int = 26) -> list[str]:
@@ -835,20 +862,20 @@ def generate_dashboard() -> Path:
         logger.warning("Could not fetch Todoist tasks: %s", exc)
         tasks = None
 
-    img = Image.new("RGB", (WIDTH, HEIGHT), "#fbfaf4")
+    img = Image.new("RGB", (WIDTH, HEIGHT), EPD_WHITE)
     draw = ImageDraw.Draw(img)
 
-    ink = "#121417"
-    muted = "#5c6270"
-    red = "#ce3328"
-    green = "#2f7d4f"
-    blue = "#245aa6"
-    yellow = "#e6b53b"
-    cream = "#f4efe3"
-    line = "#d8d0bf"
+    ink = EPD_BLACK
+    muted = EPD_BLACK  # no native gray; hierarchy comes from size/weight
+    red = EPD_RED
+    green = EPD_GREEN
+    blue = EPD_BLUE
+    yellow = EPD_YELLOW
+    cream = EPD_WHITE  # no native cream; white avoids a dithered fill
+    line = EPD_BLACK   # thin black card borders read crisp on the panel
     air_fill, air_text, air_subtext = pm25_style(air.pm25)
 
-    draw.rectangle((0, 0, WIDTH, HEIGHT), fill="#fbfaf4")
+    draw.rectangle((0, 0, WIDTH, HEIGHT), fill=EPD_WHITE)
     draw.rectangle((0, 0, WIDTH, 82), fill=ink)
     draw.rectangle((0, 82, WIDTH, 94), fill=yellow)
 
@@ -870,9 +897,9 @@ def generate_dashboard() -> Path:
     )
     header_text_top = 23
     draw_text_at_visible_top(
-        draw, (22, header_text_top), date_text, date_size, "#ffffff", True
+        draw, (22, header_text_top), date_text, date_size, EPD_WHITE, True
     )
-    draw_text(draw, (24, 54), f"{location}  |  {solar_text}", 17, "#ffffff")
+    draw_text(draw, (24, 54), f"{location}  |  {solar_text}", 17, EPD_WHITE)
     time_text = f"{now:%H:%M}"
     time_font = font(32)
     time_bbox = draw.textbbox((0, 0), time_text, font=time_font)
@@ -883,26 +910,29 @@ def generate_dashboard() -> Path:
         (time_x, header_text_top),
         time_text,
         32,
-        "#ffffff",
+        EPD_WHITE,
         True,
     )
-    centered_text_at_y(draw, 294, 382, 54, "updated", 17, "#ffffff")
+    centered_text_at_y(draw, 294, 382, 54, "updated", 17, EPD_WHITE)
 
     current_card = (18, 108, 191, 198)
     air_card = (209, 108, 382, 198)
     today_card = (18, 214, 191, 304)
     tomorrow_card = (209, 214, 382, 304)
 
-    card(draw, current_card, "#ffffff", line)
+    temp_fill, temp_ink, temp_sub = temp_style(
+        weather.current_c if weather is not None else None
+    )
+    card(draw, current_card, temp_fill, line)
     if weather is not None:
         current_lines = [
-            (f"{weather.current_c}°", 42, ink, True),
-            (weather.condition, 18, muted, False),
+            (f"{weather.current_c}°", 42, temp_ink, True),
+            (weather.condition, 18, temp_sub, False),
         ]
     else:
         current_lines = [
-            ("--°", 42, ink, True),
-            ("weather n/a", 18, muted, False),
+            ("--°", 42, temp_ink, True),
+            ("weather n/a", 18, temp_sub, False),
         ]
     draw_centered_stack(draw, current_card, current_lines, gap=4)
 
