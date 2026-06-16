@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -24,14 +25,15 @@ OUT = Path("papercolor_dashboard_test.png")
 logger = logging.getLogger("papercolor_dashboard")
 
 
+class MissingConfig(Exception):
+    """Raised when a required environment variable is absent."""
+
+
 @dataclass(frozen=True)
 class Weather:
     location: str
     current_c: int
     condition: str
-    feels_c: int
-    humidity: int
-    wind_kmh: int
     today_low: int
     today_high: int
     today_condition: str
@@ -82,7 +84,7 @@ def load_dotenv(path: Path = Path(".env")) -> None:
 def required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise SystemExit(f"Missing required environment variable: {name}")
+        raise MissingConfig(f"Missing required environment variable: {name}")
     return value
 
 
@@ -153,17 +155,19 @@ def next_solar_event(
     return event_time.strftime("%H:%M"), label
 
 
-def rain_probability_summary(
-    hourly: dict, now: datetime
-) -> dict[date, tuple[int, str | None]]:
-    times = hourly.get("time") or []
-    values = hourly.get("precipitation_probability") or []
-    if not times or not values:
-        return {}
+def _bucket_hourly_by_day(
+    hourly: dict, value_key: str, now: datetime
+) -> dict[date, list[tuple[datetime, float]]]:
+    """Group Open-Meteo hourly samples into today/tomorrow buckets.
 
+    Drops missing values and any of today's samples that are already in the
+    past, normalizing every timestamp to ``now``'s timezone.
+    """
+    times = hourly.get("time") or []
+    values = hourly.get(value_key) or []
     today = now.date()
     tomorrow = date.fromordinal(today.toordinal() + 1)
-    points: dict[date, list[tuple[datetime, int]]] = {
+    buckets: dict[date, list[tuple[datetime, float]]] = {
         today: [],
         tomorrow: [],
     }
@@ -178,13 +182,25 @@ def rain_probability_summary(
         parsed = parsed.astimezone(now.tzinfo)
         if parsed.date() == today and parsed < now:
             continue
-        if parsed.date() not in points:
+        if parsed.date() not in buckets:
             continue
 
-        points[parsed.date()].append((parsed, round(raw_value)))
+        buckets[parsed.date()].append((parsed, raw_value))
+
+    return buckets
+
+
+def rain_probability_summary(
+    hourly: dict, now: datetime
+) -> dict[date, tuple[int, str | None]]:
+    if not (hourly.get("time") and hourly.get("precipitation_probability")):
+        return {}
+
+    buckets = _bucket_hourly_by_day(hourly, "precipitation_probability", now)
 
     summary: dict[date, tuple[int, str | None]] = {}
-    for day, day_points in points.items():
+    for day, raw_points in buckets.items():
+        day_points = [(dt, round(value)) for dt, value in raw_points]
         if not day_points:
             summary[day] = (0, None)
             continue
@@ -210,7 +226,6 @@ def daily_rain_probability(daily: dict, index: int) -> int | None:
 
 
 def fetch_weather(now: datetime | None = None) -> Weather:
-    load_dotenv()
     lat = required_env("WEATHER_LAT")
     lon = required_env("WEATHER_LON")
     location = required_env("WEATHER_LOCATION")
@@ -223,10 +238,7 @@ def fetch_weather(now: datetime | None = None) -> Weather:
         "current": ",".join(
             [
                 "temperature_2m",
-                "apparent_temperature",
-                "relative_humidity_2m",
                 "weather_code",
-                "wind_speed_10m",
             ]
         ),
         "daily": ",".join(
@@ -264,9 +276,6 @@ def fetch_weather(now: datetime | None = None) -> Weather:
         location=location,
         current_c=round(current["temperature_2m"]),
         condition=weather_label(int(current["weather_code"])),
-        feels_c=round(current["apparent_temperature"]),
-        humidity=round(current["relative_humidity_2m"]),
-        wind_kmh=round(current["wind_speed_10m"]),
         today_low=round(daily["temperature_2m_min"][0]),
         today_high=round(daily["temperature_2m_max"][0]),
         today_condition=weather_label(int(daily["weather_code"][0])),
@@ -401,7 +410,7 @@ def fetch_air_quality(now: datetime | None = None) -> AirQuality:
     return AirQuality(
         aqi=rounded_aqi,
         label=pm25_label(pm25),
-        pm25=round(pm25, 1) if pm25 is not None else None,
+        pm25=pm25,
         today_pm25_min=pm25_forecast.get("today_min"),
         today_pm25_max=pm25_forecast.get("today_max"),
         today_pm25_peak_hour=pm25_forecast.get("today_peak_hour"),
@@ -428,33 +437,13 @@ def summarize_pm25_points(
 def daily_pm25_summary(
     hourly: dict, now: datetime
 ) -> dict[str, int | str]:
-    times = hourly.get("time") or []
-    values = hourly.get("pm2_5") or []
+    buckets = _bucket_hourly_by_day(hourly, "pm2_5", now)
     today = now.date()
     tomorrow = date.fromordinal(today.toordinal() + 1)
-    points: dict[date, list[tuple[datetime, float]]] = {
-        today: [],
-        tomorrow: [],
-    }
-
-    for raw_time, raw_value in zip(times, values):
-        if raw_value is None:
-            continue
-
-        parsed = datetime.fromisoformat(raw_time)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=now.tzinfo)
-        parsed = parsed.astimezone(now.tzinfo)
-        if parsed.date() == today and parsed < now:
-            continue
-        if parsed.date() not in points:
-            continue
-
-        points[parsed.date()].append((parsed, float(raw_value)))
 
     summary: dict[str, int | str] = {}
     for label, day in (("today", today), ("tomorrow", tomorrow)):
-        day_points = points[day]
+        day_points = [(dt, float(value)) for dt, value in buckets[day]]
         day_summary = summarize_pm25_points(day_points)
         if day_summary is None:
             continue
@@ -588,7 +577,8 @@ def upload_to_ezdata(image_path: Path) -> dict:
     )
 
 
-def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+@lru_cache(maxsize=None)
+def font(size: int) -> ImageFont.ImageFont:
     try:
         return ImageFont.load_default(size=size)
     except TypeError:
@@ -603,9 +593,9 @@ def draw_text(
     color: str = "#111111",
     bold: bool = False,
 ) -> None:
-    draw.text(xy, text, fill=color, font=font(size, bold))
+    draw.text(xy, text, fill=color, font=font(size))
     if bold:
-        draw.text((xy[0] + 1, xy[1]), text, fill=color, font=font(size, bold))
+        draw.text((xy[0] + 1, xy[1]), text, fill=color, font=font(size))
 
 
 def fitted_text_size(
@@ -615,10 +605,9 @@ def fitted_text_size(
     max_width: int,
     preferred_size: int,
     min_size: int,
-    bold: bool = False,
 ) -> int:
     for size in range(preferred_size, min_size - 1, -1):
-        bbox = draw.textbbox((0, 0), text, font=font(size, bold))
+        bbox = draw.textbbox((0, 0), text, font=font(size))
         if bbox[2] - bbox[0] <= max_width:
             return size
     return min_size
@@ -632,7 +621,7 @@ def draw_text_at_visible_top(
     color: str,
     bold: bool = False,
 ) -> None:
-    bbox = draw.textbbox((0, 0), text, font=font(size, bold))
+    bbox = draw.textbbox((0, 0), text, font=font(size))
     draw_text(draw, (xy[0] - bbox[0], xy[1] - bbox[1]), text, size, color, bold)
 
 
@@ -644,7 +633,7 @@ def centered_text(
     color: str,
     bold: bool = False,
 ) -> None:
-    f = font(size, bold)
+    f = font(size)
     bbox = draw.textbbox((0, 0), text, font=f)
     x = box[0] + (box[2] - box[0] - (bbox[2] - bbox[0])) // 2
     y = box[1] + (box[3] - box[1] - (bbox[3] - bbox[1])) // 2
@@ -661,7 +650,7 @@ def centered_text_at_y(
     color: str,
     bold: bool = False,
 ) -> None:
-    f = font(size, bold)
+    f = font(size)
     bbox = draw.textbbox((0, 0), text, font=f)
     x = x0 + (x1 - x0 - (bbox[2] - bbox[0])) // 2
     draw_text(draw, (x, y), text, size, color, bold)
@@ -678,7 +667,7 @@ def draw_inline_centered(
     total_width = 0
     max_height = 0
     for text, size, color, bold in segments:
-        f = font(size, bold)
+        f = font(size)
         bbox = draw.textbbox((0, 0), text, font=f)
         width = bbox[2] - bbox[0]
         height = bbox[3] - bbox[1]
@@ -706,7 +695,7 @@ def draw_centered_stack(
     measured = []
     total_height = 0
     for text, size, color, bold in lines:
-        f = font(size, bold)
+        f = font(size)
         bbox = draw.textbbox((0, 0), text, font=f)
         width = bbox[2] - bbox[0]
         height = bbox[3] - bbox[1]
@@ -781,10 +770,9 @@ def draw_forecast_card(
 
 def draw_section(
     draw: ImageDraw.ImageDraw, y: int, title: str, color: str
-) -> int:
+) -> None:
     draw.rounded_rectangle((18, y, WIDTH - 18, y + 30), radius=6, fill=color)
     draw_text(draw, (30, y + 5), title.upper(), 16, "#ffffff", True)
-    return y + 42
 
 
 def clipped_task(text: str, width: int = 26) -> list[str]:
@@ -795,10 +783,6 @@ def clipped_task(text: str, width: int = 26) -> list[str]:
         max_lines=2,
         placeholder="...",
     ) or [""]
-
-
-def measure_task_height(task: TodoistTask) -> int:
-    return 44 if len(clipped_task(task.content)) > 1 else 29
 
 
 def display_date(now: datetime) -> str:
@@ -883,7 +867,6 @@ def generate_dashboard() -> Path:
         max_width=258,
         preferred_size=32,
         min_size=25,
-        bold=True,
     )
     header_text_top = 23
     draw_text_at_visible_top(
@@ -891,7 +874,7 @@ def generate_dashboard() -> Path:
     )
     draw_text(draw, (24, 54), f"{location}  |  {solar_text}", 17, "#ffffff")
     time_text = f"{now:%H:%M}"
-    time_font = font(32, True)
+    time_font = font(32)
     time_bbox = draw.textbbox((0, 0), time_text, font=time_font)
     time_width = time_bbox[2] - time_bbox[0]
     time_x = 292 + (382 - 292 - time_width) // 2
@@ -999,7 +982,8 @@ def generate_dashboard() -> Path:
         shown_count = 0
         hidden_count = 0
         for task_index, task in enumerate(tasks):
-            task_height = measure_task_height(task)
+            lines = clipped_task(task.content)
+            task_height = 44 if len(lines) > 1 else 29
             remaining_after_task = len(tasks) - task_index - 1
             needs_more_line = remaining_after_task > 0
             reserved_more = 28 if needs_more_line else 0
@@ -1011,7 +995,6 @@ def generate_dashboard() -> Path:
             marker = "!" if task.overdue else "-"
             marker_color = red if task.overdue else muted
             draw_text(draw, (28, task_y), marker, 20, marker_color, True)
-            lines = clipped_task(task.content)
             draw_text(
                 draw,
                 (56, task_y),
@@ -1064,18 +1047,23 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    image_path = generate_dashboard()
-    logger.info("Dashboard generated: %s", image_path)
-    if args.upload:
-        result = upload_to_ezdata(image_path)
-        code = result.get("code")
-        msg = result.get("msg")
-        if code == 200:
-            logger.info("Image uploaded to EzData (code=%s msg=%s)", code, msg)
-        else:
-            logger.error(
-                "EzData rejected the upload (code=%s msg=%s)", code, msg
-            )
+    try:
+        image_path = generate_dashboard()
+        logger.info("Dashboard generated: %s", image_path)
+        if args.upload:
+            result = upload_to_ezdata(image_path)
+            code = result.get("code")
+            msg = result.get("msg")
+            if code == 200:
+                logger.info(
+                    "Image uploaded to EzData (code=%s msg=%s)", code, msg
+                )
+            else:
+                logger.error(
+                    "EzData rejected the upload (code=%s msg=%s)", code, msg
+                )
+    except MissingConfig as exc:
+        raise SystemExit(str(exc))
 
 
 if __name__ == "__main__":
