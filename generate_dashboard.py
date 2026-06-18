@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 WIDTH = 400
 HEIGHT = 600
 OUT = Path("papercolor_dashboard_test.png")
+FORECAST_DAYS = 3
 
 # E Ink Spectra 6 native palette — the ONLY six colors the PaperColor panel
 # (ED2208) renders WITHOUT dithering. The firmware quantizes every uploaded
@@ -44,22 +45,30 @@ class MissingConfig(Exception):
 
 
 @dataclass(frozen=True)
+class DayWeather:
+    day: date
+    condition: str
+    low: int
+    high: int
+    rain_prob: int | None
+    rain_hour: str | None
+
+
+@dataclass(frozen=True)
 class Weather:
     location: str
     current_c: int
     condition: str
-    today_low: int
-    today_high: int
-    today_condition: str
-    today_rain_prob: int | None
-    today_rain_hour: str | None
-    tomorrow_low: int
-    tomorrow_high: int
-    tomorrow_condition: str
-    tomorrow_rain_prob: int | None
-    tomorrow_rain_hour: str | None
+    days: tuple[DayWeather, ...]
     next_solar_time: str | None
     next_solar_label: str | None
+
+
+@dataclass(frozen=True)
+class DayAir:
+    pm25_min: int | None
+    pm25_max: int | None
+    pm25_peak_hour: str | None
 
 
 @dataclass(frozen=True)
@@ -67,12 +76,7 @@ class AirQuality:
     aqi: int | None
     label: str
     pm25: float | None
-    today_pm25_min: int | None = None
-    today_pm25_max: int | None = None
-    today_pm25_peak_hour: str | None = None
-    tomorrow_pm25_min: int | None = None
-    tomorrow_pm25_max: int | None = None
-    tomorrow_pm25_peak_hour: str | None = None
+    days: dict[date, DayAir]
 
 
 @dataclass(frozen=True)
@@ -170,9 +174,9 @@ def next_solar_event(
 
 
 def _bucket_hourly_by_day(
-    hourly: dict, value_key: str, now: datetime
+    hourly: dict, value_key: str, now: datetime, num_days: int = FORECAST_DAYS
 ) -> dict[date, list[tuple[datetime, float]]]:
-    """Group Open-Meteo hourly samples into today/tomorrow buckets.
+    """Group Open-Meteo hourly samples into per-day buckets (today onward).
 
     Drops missing values and any of today's samples that are already in the
     past, normalizing every timestamp to ``now``'s timezone.
@@ -180,10 +184,9 @@ def _bucket_hourly_by_day(
     times = hourly.get("time") or []
     values = hourly.get(value_key) or []
     today = now.date()
-    tomorrow = date.fromordinal(today.toordinal() + 1)
     buckets: dict[date, list[tuple[datetime, float]]] = {
-        today: [],
-        tomorrow: [],
+        date.fromordinal(today.toordinal() + offset): []
+        for offset in range(num_days)
     }
 
     for raw_time, raw_value in zip(times, values):
@@ -267,7 +270,7 @@ def fetch_weather(now: datetime | None = None) -> Weather:
         ),
         "hourly": "precipitation_probability",
         "timezone": timezone,
-        "forecast_days": "2",
+        "forecast_days": str(FORECAST_DAYS),
     }
     data = request_json(
         "https://api.open-meteo.com/v1/forecast", params=params
@@ -276,30 +279,29 @@ def fetch_weather(now: datetime | None = None) -> Weather:
     current = data["current"]
     daily = data["daily"]
     rain_summary = rain_probability_summary(data.get("hourly", {}), now)
-    today_rain_prob, today_rain_hour = rain_summary.get(
-        now.date(),
-        (daily_rain_probability(daily, 0), None),
-    )
-    tomorrow = date.fromordinal(now.date().toordinal() + 1)
-    tomorrow_rain_prob, tomorrow_rain_hour = rain_summary.get(
-        tomorrow,
-        (daily_rain_probability(daily, 1), None),
-    )
+    daily_dates = daily.get("time") or []
+    days: list[DayWeather] = []
+    for index in range(min(FORECAST_DAYS, len(daily_dates))):
+        day = date.fromisoformat(daily_dates[index])
+        rain_prob, rain_hour = rain_summary.get(
+            day, (daily_rain_probability(daily, index), None)
+        )
+        days.append(
+            DayWeather(
+                day=day,
+                condition=weather_label(int(daily["weather_code"][index])),
+                low=round(daily["temperature_2m_min"][index]),
+                high=round(daily["temperature_2m_max"][index]),
+                rain_prob=rain_prob,
+                rain_hour=rain_hour,
+            )
+        )
     next_solar_time, next_solar_label = next_solar_event(daily, now)
     return Weather(
         location=location,
         current_c=round(current["temperature_2m"]),
         condition=weather_label(int(current["weather_code"])),
-        today_low=round(daily["temperature_2m_min"][0]),
-        today_high=round(daily["temperature_2m_max"][0]),
-        today_condition=weather_label(int(daily["weather_code"][0])),
-        today_rain_prob=today_rain_prob,
-        today_rain_hour=today_rain_hour,
-        tomorrow_low=round(daily["temperature_2m_min"][1]),
-        tomorrow_high=round(daily["temperature_2m_max"][1]),
-        tomorrow_condition=weather_label(int(daily["weather_code"][1])),
-        tomorrow_rain_prob=tomorrow_rain_prob,
-        tomorrow_rain_hour=tomorrow_rain_hour,
+        days=tuple(days),
         next_solar_time=next_solar_time,
         next_solar_label=next_solar_label,
     )
@@ -397,19 +399,45 @@ def pm25_style(pm25: float | None) -> tuple[str, str, str]:
     return EPD_RED, EPD_WHITE, EPD_WHITE
 
 
-WARM_TEMP_C = 18
+RAIN_CHIP_THRESHOLD = 50
 
 
-def temp_style(temp_c: int | None) -> tuple[str, str, str]:
-    """Return (card_fill, temp_color, condition_color) for the weather card.
+def temp_chip_style(temp_c: int | None) -> tuple[str, str | None]:
+    """Return (text_color, fill) for a temperature value, by band.
 
-    At/above WARM_TEMP_C the card switches to the panel's native yellow so it
-    pops on the Spectra 6 e-paper. All values come from the native palette, so
-    the fill stays solid instead of grainy.
+    A fill of None means the value sits plainly on the page (black on white),
+    so mild days stay clean and only extremes light up. The four bands map to
+    the panel's native inks, so fills stay solid instead of grainy:
+    blue <10, none 10-19, yellow 20-29, red >=30.
     """
-    if temp_c is not None and temp_c >= WARM_TEMP_C:
-        return EPD_YELLOW, EPD_BLACK, EPD_BLACK
-    return EPD_WHITE, EPD_BLACK, EPD_BLACK
+    if temp_c is None:
+        return EPD_BLACK, None
+    if temp_c < 10:
+        return EPD_WHITE, EPD_BLUE
+    if temp_c < 20:
+        return EPD_BLACK, None
+    if temp_c < 30:
+        return EPD_BLACK, EPD_YELLOW
+    return EPD_WHITE, EPD_RED
+
+
+def temp_style(temp_c: int | None) -> tuple[str, str]:
+    """(card_fill, text_color) for the big current-temperature card."""
+    fg, bg = temp_chip_style(temp_c)
+    return (bg if bg is not None else EPD_WHITE), fg
+
+
+def pm_chip_style(value: float | None) -> tuple[str, str | None]:
+    """Return (text_color, fill) for a PM2.5 value drawn as an inline chip.
+
+    Mirrors pm25_style's health bands but only highlights the unhealthy end:
+    no fill <=35.4, yellow <=55.4, red above.
+    """
+    if value is None or value <= 35.4:
+        return EPD_BLACK, None
+    if value <= 55.4:
+        return EPD_BLACK, EPD_YELLOW
+    return EPD_WHITE, EPD_RED
 
 
 def fetch_air_quality(now: datetime | None = None) -> AirQuality:
@@ -424,7 +452,7 @@ def fetch_air_quality(now: datetime | None = None) -> AirQuality:
             "longitude": lon,
             "current": "us_aqi,pm2_5",
             "hourly": "pm2_5",
-            "forecast_days": "2",
+            "forecast_days": str(FORECAST_DAYS),
             "timezone": timezone,
         },
     )
@@ -433,17 +461,19 @@ def fetch_air_quality(now: datetime | None = None) -> AirQuality:
     rounded_aqi = round(aqi) if aqi is not None else None
     pm25 = current.get("pm2_5")
     hourly = data.get("hourly", {})
-    pm25_forecast = daily_pm25_summary(hourly, now)
+    days = {
+        day: DayAir(
+            pm25_min=summary["min"],
+            pm25_max=summary["max"],
+            pm25_peak_hour=summary["peak_hour"],
+        )
+        for day, summary in daily_pm25_summary(hourly, now).items()
+    }
     return AirQuality(
         aqi=rounded_aqi,
         label=pm25_label(pm25),
         pm25=pm25,
-        today_pm25_min=pm25_forecast.get("today_min"),
-        today_pm25_max=pm25_forecast.get("today_max"),
-        today_pm25_peak_hour=pm25_forecast.get("today_peak_hour"),
-        tomorrow_pm25_min=pm25_forecast.get("tomorrow_min"),
-        tomorrow_pm25_max=pm25_forecast.get("tomorrow_max"),
-        tomorrow_pm25_peak_hour=pm25_forecast.get("tomorrow_peak_hour"),
+        days=days,
     )
 
 
@@ -463,20 +493,14 @@ def summarize_pm25_points(
 
 def daily_pm25_summary(
     hourly: dict, now: datetime
-) -> dict[str, int | str]:
+) -> dict[date, dict[str, int | str]]:
     buckets = _bucket_hourly_by_day(hourly, "pm2_5", now)
-    today = now.date()
-    tomorrow = date.fromordinal(today.toordinal() + 1)
-
-    summary: dict[str, int | str] = {}
-    for label, day in (("today", today), ("tomorrow", tomorrow)):
-        day_points = [(dt, float(value)) for dt, value in buckets[day]]
+    summary: dict[date, dict[str, int | str]] = {}
+    for day, raw_points in buckets.items():
+        day_points = [(dt, float(value)) for dt, value in raw_points]
         day_summary = summarize_pm25_points(day_points)
-        if day_summary is None:
-            continue
-        summary[f"{label}_min"] = day_summary["min"]
-        summary[f"{label}_max"] = day_summary["max"]
-        summary[f"{label}_peak_hour"] = day_summary["peak_hour"]
+        if day_summary is not None:
+            summary[day] = day_summary
     return summary
 
 
@@ -652,21 +676,6 @@ def draw_text_at_visible_top(
     draw_text(draw, (xy[0] - bbox[0], xy[1] - bbox[1]), text, size, color, bold)
 
 
-def centered_text(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    text: str,
-    size: int,
-    color: str,
-    bold: bool = False,
-) -> None:
-    f = font(size)
-    bbox = draw.textbbox((0, 0), text, font=f)
-    x = box[0] + (box[2] - box[0] - (bbox[2] - bbox[0])) // 2
-    y = box[1] + (box[3] - box[1] - (bbox[3] - bbox[1])) // 2
-    draw_text(draw, (x, y), text, size, color, bold)
-
-
 def centered_text_at_y(
     draw: ImageDraw.ImageDraw,
     x0: int,
@@ -681,36 +690,6 @@ def centered_text_at_y(
     bbox = draw.textbbox((0, 0), text, font=f)
     x = x0 + (x1 - x0 - (bbox[2] - bbox[0])) // 2
     draw_text(draw, (x, y), text, size, color, bold)
-
-
-def draw_inline_centered(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    segments: list[tuple[str, int, str, bool]],
-    gap: int,
-) -> None:
-    x0, y0, x1, y1 = box
-    measured = []
-    total_width = 0
-    max_height = 0
-    for text, size, color, bold in segments:
-        f = font(size)
-        bbox = draw.textbbox((0, 0), text, font=f)
-        width = bbox[2] - bbox[0]
-        height = bbox[3] - bbox[1]
-        measured.append((text, size, color, bold, bbox, width, height))
-        total_width += width
-        max_height = max(max_height, height)
-    total_width += gap * max(0, len(measured) - 1)
-
-    x = x0 + (x1 - x0 - total_width) // 2
-    y = y0 + (y1 - y0 - max_height) // 2
-    for text, size, color, bold, bbox, width, height in measured:
-        segment_y = y + (max_height - height) // 2
-        draw_text(
-            draw, (x - bbox[0], segment_y - bbox[1]), text, size, color, bold
-        )
-        x += width + gap
 
 
 def draw_centered_stack(
@@ -746,53 +725,218 @@ def card(
     draw.rounded_rectangle(box, radius=8, fill=fill, outline=outline, width=2)
 
 
-def draw_forecast_card(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    title: str,
-    title_color: str,
-    value: str,
-    subtitle: str,
-    rain_prob: int | None,
-    fill: str,
-    outline: str,
-    ink: str,
-    muted: str,
-    rain_hour: str | None = None,
-    pm25_min: int | None = None,
-    pm25_max: int | None = None,
-    peak_hour: str | None = None,
-) -> None:
-    card(draw, box, fill, outline)
-    pm25_line = (
-        f"PM2.5 {pm25_min}-{pm25_max} {peak_hour[:2]}h"
-        if pm25_min is not None and pm25_max is not None and peak_hour
-        else "PM2.5 n/a"
-    )
-    x0, y0, x1, _ = box
-    draw_inline_centered(
-        draw,
-        (x0 + 10, y0 + 12, x1 - 10, y0 + 28),
-        [(title, 14, title_color, True), (subtitle, 14, muted, False)],
-        gap=6,
+# --- Forecast rows ----------------------------------------------------------
+# Each day is one full-width row laid out as a column grid. Numeric data is
+# drawn as "chips": a token sitting on a rounded native-color fill (white/black
+# text for contrast), so temperature/rain/air severity reads at a glance.
+# A token is (text, text_color, fill); a fill of None means plain text.
+
+FORECAST_SIZE = 16
+CHIP_PADX = 4      # chip horizontal padding
+CHIP_H = 21        # uniform chip height
+CHIP_R = 7         # chip corner radius (rounded, not a full pill)
+CHIP_GAP = 0       # gap between tokens within one field
+
+WEEKDAY_ABBR = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+
+SHORT_COND = {
+    "Mostly clear": "Clear",
+    "Partly cloudy": "Cloudy",
+    "Heavy showers": "Showers",
+    "Heavy rain": "Rain",
+    "Heavy snow": "Snow",
+    "Heavy storm": "Storm",
+    "Rime fog": "Fog",
+}
+
+
+def cond_tokens(condition: str) -> list[tuple[str, str, str | None]]:
+    return [(SHORT_COND.get(condition, condition), EPD_BLACK, None)]
+
+
+def temp_tokens(low: int, high: int) -> list[tuple[str, str, str | None]]:
+    low_fg, low_bg = temp_chip_style(low)
+    high_fg, high_bg = temp_chip_style(high)
+    return [
+        (f"{low}°", low_fg, low_bg),
+        ("/", EPD_BLACK, None),
+        (f"{high}°", high_fg, high_bg),
+    ]
+
+
+def rain_tokens(
+    prob: int | None, hour: str | None
+) -> list[tuple[str, str, str | None]]:
+    if prob is None:
+        return [("--", EPD_BLACK, None)]
+    text = f"{prob}% {hour}" if hour else f"{prob}%"
+    if prob >= RAIN_CHIP_THRESHOLD:
+        return [(text, EPD_WHITE, EPD_BLUE)]
+    return [(text, EPD_BLACK, None)]
+
+
+def pm_tokens(
+    low: int | None, high: int | None, peak_hour: str | None
+) -> list[tuple[str, str, str | None]]:
+    if low is None or high is None:
+        return [("PM2.5 n/a", EPD_BLACK, None)]
+    low_fg, low_bg = pm_chip_style(low)
+    high_fg, high_bg = pm_chip_style(high)
+    # The peak hour is *when* the max happens, so it shares the max's chip.
+    high_text = f"{high} {peak_hour[:2]}h" if peak_hour else f"{high}"
+    return [
+        (f"{low}", low_fg, low_bg),
+        ("-", EPD_BLACK, None),
+        (high_text, high_fg, high_bg),
+    ]
+
+
+def token_width(
+    draw: ImageDraw.ImageDraw, token: tuple[str, str, str | None]
+) -> int:
+    text, _, fill = token
+    bbox = draw.textbbox((0, 0), text, font=font(FORECAST_SIZE))
+    return (bbox[2] - bbox[0]) + (2 * CHIP_PADX if fill is not None else 0)
+
+
+def field_width(
+    draw: ImageDraw.ImageDraw, tokens: list[tuple[str, str, str | None]]
+) -> int:
+    return sum(token_width(draw, t) for t in tokens) + CHIP_GAP * (
+        len(tokens) - 1
     )
 
-    rain_segments: list[tuple[str, int, str, bool]] = [
-        (value.replace(" / ", "/"), 19, ink, True)
-    ]
-    rain_text = f"{rain_prob}%" if rain_prob is not None else "--"
-    rain_segments.append((rain_text, 19, muted, False))
-    if rain_prob and rain_hour:
-        rain_segments.append((rain_hour, 19, muted, rain_prob > 50))
-    draw_inline_centered(
-        draw,
-        (x0 + 10, y0 + 35, x1 - 10, y0 + 59),
-        rain_segments,
-        gap=7,
-    )
-    centered_text(
-        draw, (x0 + 8, y0 + 60, x1 - 8, y0 + 82), pm25_line, 16, muted
-    )
+
+def draw_chip_token(
+    draw: ImageDraw.ImageDraw,
+    x: float,
+    ym: float,
+    token: tuple[str, str, str | None],
+) -> float:
+    """Draw one token, left ink edge at x, vertically centered on mid-line ym.
+
+    Vertical centering uses anchor="?m" (font metrics), so a descender such as
+    the 'y' in Cloudy never shifts a token relative to an all-digit one.
+    Returns the advance width.
+    """
+    text, fg, fill = token
+    bbox = draw.textbbox((0, 0), text, font=font(FORECAST_SIZE))
+    width = bbox[2] - bbox[0]
+    if fill is not None:
+        draw.rounded_rectangle(
+            (x, ym - CHIP_H / 2, x + width + 2 * CHIP_PADX, ym + CHIP_H / 2),
+            radius=CHIP_R,
+            fill=fill,
+        )
+        draw.text(
+            (x + CHIP_PADX, ym),
+            text,
+            fill=fg,
+            font=font(FORECAST_SIZE),
+            anchor="lm",
+        )
+        return width + 2 * CHIP_PADX
+    draw.text((x, ym), text, fill=fg, font=font(FORECAST_SIZE), anchor="lm")
+    return width
+
+
+def draw_field(
+    draw: ImageDraw.ImageDraw,
+    column: tuple[float, float],
+    ym: float,
+    tokens: list[tuple[str, str, str | None]],
+    align: str = "center",
+) -> None:
+    x0, x1 = column
+    width = field_width(draw, tokens)
+    x = x0 if align == "left" else x0 + (x1 - x0 - width) / 2
+    for token in tokens:
+        x += draw_chip_token(draw, x, ym, token) + CHIP_GAP
+
+
+def draw_day_label(
+    draw: ImageDraw.ImageDraw, x: int, ym: float, day: str
+) -> None:
+    for dx in (0, 1):  # faux-bold; day label anchors the row
+        draw.text(
+            (x + dx, ym),
+            day,
+            fill=EPD_BLACK,
+            font=font(FORECAST_SIZE),
+            anchor="lm",
+        )
+
+
+def day_label(day: date) -> str:
+    """Compact forecast label: weekday then day-of-month, e.g. "THU 18"."""
+    return f"{WEEKDAY_ABBR[day.weekday()]} {day.day}"
+
+
+def draw_forecast_rows(
+    draw: ImageDraw.ImageDraw,
+    top: int,
+    weather: Weather | None,
+    air: AirQuality,
+    row_height: int = 30,
+) -> int:
+    """Render the multi-day forecast as a chip grid, one row per day.
+
+    Columns are sized to the widest content across all rows so the rows line
+    up. Day labels and the condition column are left-aligned; numeric data
+    columns are centered. Returns the bottom y.
+    """
+    if weather is None or not weather.days:
+        draw_text(draw, (20, top + 8), "Forecast n/a", 18, EPD_BLACK, True)
+        return top + row_height
+
+    fields = []
+    for day_weather in weather.days:
+        day_air = air.days.get(day_weather.day)
+        fields.append(
+            {
+                "cond": cond_tokens(day_weather.condition),
+                "temp": temp_tokens(day_weather.low, day_weather.high),
+                "rain": rain_tokens(
+                    day_weather.rain_prob, day_weather.rain_hour
+                ),
+                "pm": pm_tokens(
+                    day_air.pm25_min if day_air else None,
+                    day_air.pm25_max if day_air else None,
+                    day_air.pm25_peak_hour if day_air else None,
+                ),
+            }
+        )
+
+    data_x0, data_x1 = 80, WIDTH - 18
+    order = ["cond", "temp", "rain", "pm"]
+    maxw = {key: max(field_width(draw, f[key]) for f in fields)
+            for key in order}
+    # Graceful degradation: on an extreme day (all chips, signed temps, 3-digit
+    # air) drop the least essential column — the condition — before overflowing.
+    if sum(maxw.values()) > data_x1 - data_x0:
+        order = ["temp", "rain", "pm"]
+        maxw = {key: maxw[key] for key in order}
+
+    pad = max(0.0, (data_x1 - data_x0 - sum(maxw.values())) / len(order))
+    columns: dict[str, tuple[float, float]] = {}
+    cursor = float(data_x0)
+    for key in order:
+        columns[key] = (cursor, cursor + maxw[key] + pad)
+        cursor += maxw[key] + pad
+
+    for index, (day_weather, field) in enumerate(zip(weather.days, fields)):
+        ym = top + row_height / 2 + index * row_height
+        label = "TODAY" if index == 0 else day_label(day_weather.day)
+        draw_day_label(draw, 20, ym, label)
+        for key in order:
+            draw_field(
+                draw,
+                columns[key],
+                ym,
+                field[key],
+                align="left" if key == "cond" else "center",
+            )
+    return top + row_height * len(weather.days)
 
 
 def draw_section(
@@ -854,7 +998,7 @@ def generate_dashboard() -> Path:
         air = fetch_air_quality(now)
     except Exception as exc:
         logger.warning("Could not fetch air quality: %s", exc)
-        air = AirQuality(aqi=None, label="--", pm25=None)
+        air = AirQuality(aqi=None, label="--", pm25=None, days={})
 
     try:
         tasks: list[TodoistTask] | None = fetch_todoist_tasks(now)
@@ -871,7 +1015,6 @@ def generate_dashboard() -> Path:
     green = EPD_GREEN
     blue = EPD_BLUE
     yellow = EPD_YELLOW
-    cream = EPD_WHITE  # no native cream; white avoids a dithered fill
     line = EPD_BLACK   # thin black card borders read crisp on the panel
     air_fill, air_text, air_subtext = pm25_style(air.pm25)
 
@@ -917,22 +1060,20 @@ def generate_dashboard() -> Path:
 
     current_card = (18, 108, 191, 198)
     air_card = (209, 108, 382, 198)
-    today_card = (18, 214, 191, 304)
-    tomorrow_card = (209, 214, 382, 304)
 
-    temp_fill, temp_ink, temp_sub = temp_style(
+    temp_fill, temp_ink = temp_style(
         weather.current_c if weather is not None else None
     )
     card(draw, current_card, temp_fill, line)
     if weather is not None:
         current_lines = [
             (f"{weather.current_c}°", 42, temp_ink, True),
-            (weather.condition, 18, temp_sub, False),
+            (weather.condition, 18, temp_ink, False),
         ]
     else:
         current_lines = [
             ("--°", 42, temp_ink, True),
-            ("weather n/a", 18, temp_sub, False),
+            ("weather n/a", 18, temp_ink, False),
         ]
     draw_centered_stack(draw, current_card, current_lines, gap=4)
 
@@ -962,46 +1103,9 @@ def generate_dashboard() -> Path:
         gap=7,
     )
 
-    draw_forecast_card(
-        draw,
-        today_card,
-        "TODAY",
-        red,
-        f"{weather.today_low}° / {weather.today_high}°" if weather else "n/a",
-        weather.today_condition if weather else "weather n/a",
-        weather.today_rain_prob if weather else None,
-        cream,
-        line,
-        ink,
-        muted,
-        weather.today_rain_hour if weather else None,
-        air.today_pm25_min,
-        air.today_pm25_max,
-        air.today_pm25_peak_hour,
-    )
-    draw_forecast_card(
-        draw,
-        tomorrow_card,
-        "TOMORROW",
-        green,
-        (
-            f"{weather.tomorrow_low}° / {weather.tomorrow_high}°"
-            if weather
-            else "n/a"
-        ),
-        weather.tomorrow_condition if weather else "weather n/a",
-        weather.tomorrow_rain_prob if weather else None,
-        cream,
-        line,
-        ink,
-        muted,
-        weather.tomorrow_rain_hour if weather else None,
-        air.tomorrow_pm25_min,
-        air.tomorrow_pm25_max,
-        air.tomorrow_pm25_peak_hour,
-    )
+    draw_forecast_rows(draw, 202, weather, air)
 
-    y = 330
+    y = 300
     draw_section(draw, y, "Tasks", red if tasks else blue)
     if tasks is None:
         draw_text(draw, (28, y + 44), "Tasks n/a", 20, muted, True)
