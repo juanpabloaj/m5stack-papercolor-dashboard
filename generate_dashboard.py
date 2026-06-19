@@ -23,18 +23,19 @@ HEIGHT = 600
 OUT = Path("papercolor_dashboard_test.png")
 FORECAST_DAYS = 3
 
-# E Ink Spectra 6 native palette — the ONLY six colors the PaperColor panel
-# (ED2208) renders WITHOUT dithering. The firmware quantizes every uploaded
-# pixel to the nearest of these via a nearest-color table and then diffuses the
-# error, which is the grainy "dirty color" look. A pixel that already equals one
-# of these has zero error, so flat fills stay solid. Values copied verbatim from
-# the firmware: M5GFX Panel_ED2208.cpp epd_palette[] (same path the EzData image
-# takes). There is no native gray, cream or orange — map those to black/white.
+# E Ink Spectra 6 palette for the PaperColor panel (ED2208). The device
+# quantizes every uploaded image to 6 inks and diffuses the error (the grainy
+# "dirty color" look); a pixel already equal to an ink anchor has zero error, so
+# flat fills stay solid. Black/white/yellow/red/green are the M5GFX
+# Panel_ED2208.cpp epd_palette[] values. BLUE is the exception: the M5GFX value
+# (100,64,255, a violet-blue) visibly dithered on the real EzData render path, so
+# its quantizer's blue anchor differs from M5GFX's. An on-device swatch sweep
+# showed pure blue (0,0,255) renders cleanest, so we use that. No gray/cream.
 EPD_BLACK = "#000000"   # 0, 0, 0
 EPD_WHITE = "#ffffff"   # 255, 255, 255
 EPD_YELLOW = "#fff338"  # 255, 243, 56
 EPD_RED = "#bf0000"     # 191, 0, 0
-EPD_BLUE = "#6440ff"    # 100, 64, 255
+EPD_BLUE = "#0000ff"    # 0, 0, 255 — tuned on-device (M5GFX 100,64,255 dithered)
 EPD_GREEN = "#438a1c"   # 67, 138, 28
 
 logger = logging.getLogger("papercolor_dashboard")
