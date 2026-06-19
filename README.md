@@ -21,8 +21,7 @@ inks. The firmware quantizes every uploaded image to the nearest of these and
 then diffuses the quantization error, so any other color renders grainy (the
 "dirty color" look). Use only these exact values for flat fills and text and
 they stay solid — a pixel that already equals a palette entry has zero error to
-diffuse. Values are copied from the firmware's nearest-color table
-(`M5GFX Panel_ED2208.cpp` `epd_palette[]`):
+diffuse:
 
 | Color  | RGB           | Hex       |
 |--------|---------------|-----------|
@@ -30,12 +29,21 @@ diffuse. Values are copied from the firmware's nearest-color table
 | White  | 255, 255, 255 | `#ffffff` |
 | Yellow | 255, 243, 56  | `#fff338` |
 | Red    | 191, 0, 0     | `#bf0000` |
-| Blue   | 100, 64, 255  | `#6440ff` |
+| Blue   | 0, 0, 255     | `#0000ff` |
 | Green  | 67, 138, 28   | `#438a1c` |
 
-There is no native gray, cream, or orange — map those to black or white.
-`generate_dashboard.py` exposes these as the `EPD_*` constants and uses them
-exclusively, so the whole dashboard renders without dithering.
+Black/white/yellow/red/green match the M5GFX `Panel_ED2208.cpp` `epd_palette[]`
+table, but **blue is the exception**: the M5GFX value `#6440ff` (100, 64, 255, a
+violet-blue) visibly dithered on the real EzData render path. An on-device
+swatch sweep showed pure blue `#0000ff` renders cleanest, so the EzData
+image-display quantizer is not identical to M5GFX — verify inks on the actual
+device. There is no native gray, cream, or orange — map those to black/white.
+
+Two more rules keep flat fills solid: `generate_dashboard.py` exposes these as
+the `EPD_*` constants and uses them exclusively, and it sets `draw.fontmode =
+"1"` so text is drawn without antialiasing (antialiased glyph edges are
+off-palette tones the firmware would otherwise dither, the grain most visible as
+white text on the blue fills).
 
 ## EzData Image Upload
 

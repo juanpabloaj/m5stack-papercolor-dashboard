@@ -1009,6 +1009,10 @@ def generate_dashboard() -> Path:
 
     img = Image.new("RGB", (WIDTH, HEIGHT), EPD_WHITE)
     draw = ImageDraw.Draw(img)
+    # Render text without antialiasing so glyph pixels are exact palette inks.
+    # Antialiased edges produce off-palette tones the panel firmware dithers
+    # (the grain seen on the blue fills); "1" mode keeps every glyph pixel solid.
+    draw.fontmode = "1"
 
     ink = EPD_BLACK
     muted = EPD_BLACK  # no native gray; hierarchy comes from size/weight
