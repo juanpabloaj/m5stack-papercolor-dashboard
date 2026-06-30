@@ -1190,7 +1190,16 @@ def main() -> None:
         image_path = generate_dashboard()
         logger.info("Dashboard generated: %s", image_path)
         if args.upload:
-            result = upload_to_ezdata(image_path)
+            try:
+                result = upload_to_ezdata(image_path)
+            except (
+                TimeoutError,
+                urllib.error.URLError,
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                logger.error("Could not upload image to EzData: %s", exc)
+                raise SystemExit(2) from exc
             code = result.get("code")
             msg = result.get("msg")
             if code == 200:
